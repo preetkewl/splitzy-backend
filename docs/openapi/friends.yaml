@@ -1,0 +1,369 @@
+openapi: 3.1.0
+info:
+  title: Splitzy — Friends + Requests API
+  description: |
+    Lightweight friend graph that powers trip-creation member selection.
+    Not a social network: no messaging, presence, feeds, or recommendations.
+
+    **Canonical friendship.** A `Friendship` row is stored once with the
+    lexicographically smaller userId in `userAId`. The friend list always
+    returns the *other* user from the caller's perspective.
+
+    **Idempotent send.** Re-posting `POST /friends/request` for the same
+    target returns the existing pending row (201 with the same id).
+    A request whose status is `DECLINED` or `CANCELLED` is reopened in
+    place — no duplicate row.
+
+    **Reverse-direction conflict.** If the target has already sent the
+    caller a pending request, the API returns 409 with a hint to accept
+    the incoming one instead of spamming a fresh outgoing.
+  version: '0.1.0'
+
+servers:
+  - url: 'http://localhost:4000/api/v1'
+    description: Local dev
+
+tags:
+  - name: Friends
+    description: Friendships + directory search.
+  - name: Requests
+    description: Friend request lifecycle.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /friends:
+    get:
+      tags: [Friends]
+      summary: List the caller's friends.
+      description: |
+        Returns confirmed friendships, each rendered as the OTHER user
+        (never the caller). Sorted by friendship `since` desc.
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: Page of friends.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_FriendList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /friends/search:
+    get:
+      tags: [Friends]
+      summary: Directory search for potential friends.
+      description: |
+        Case-insensitive substring match on `name`, `handle`, and
+        `phone`. Excludes the calling user. Each result carries a
+        `relationship` flag and (when applicable) the `requestId` of the
+        pending request — the frontend renders the right CTA without a
+        second round-trip.
+
+        Result count is hard-capped at `SEARCH_MAX_LIMIT` (50). Mobile
+        UX optimization — pagination is intentionally not exposed.
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema: { type: string, minLength: 2, maxLength: 60 }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        '200':
+          description: Matching users.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_SearchResults'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /friends/requests:
+    get:
+      tags: [Requests]
+      summary: List the caller's pending friend requests.
+      description: |
+        Returns both `incoming` (others requesting *me*) and `outgoing`
+        (*I* requested others) collections in one call to power the
+        Requests screen with its two-tab UI.
+      responses:
+        '200':
+          description: Pending requests.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_RequestList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /friends/request:
+    post:
+      tags: [Requests]
+      summary: Send a friend request.
+      description: |
+        Idempotent. If a pending row already exists from the caller to
+        the target, returns it unchanged. If a `DECLINED` / `CANCELLED`
+        row exists for the same direction, it's reopened in place.
+
+        Returns 409 if:
+          - the caller is already friends with the target
+          - the target has already sent a pending request to the caller
+            (the caller should accept the incoming one instead)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendRequest'
+      responses:
+        '201':
+          description: Created (or reopened, or returned idempotently).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Request'
+        '400':
+          description: Self-request, or invalid input.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Target user does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Already friends, or reverse-direction request pending.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /friends/request/{requestId}/accept:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    post:
+      tags: [Requests]
+      summary: Accept a pending friend request (recipient only).
+      description: |
+        Atomic: the request transitions to `ACCEPTED` and the canonical
+        `Friendship` row is inserted in one transaction. Subsequent
+        accepts on the same request return 409.
+      responses:
+        '200':
+          description: Accepted; updated request returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Request'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Caller is not the recipient.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Request not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Request is already finalized (accepted/declined/cancelled).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /friends/request/{requestId}/reject:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    post:
+      tags: [Requests]
+      summary: Reject a pending friend request (recipient only).
+      responses:
+        '200':
+          description: Rejected; updated request returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Request'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Request is already finalized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    RequestId:
+      in: path
+      name: requestId
+      required: true
+      schema: { type: string, format: uuid }
+
+  schemas:
+    SendRequest:
+      type: object
+      required: [targetUserId]
+      properties:
+        targetUserId: { type: string, format: uuid }
+        message: { type: string, maxLength: 280, nullable: true }
+
+    FriendUserPreview:
+      type: object
+      required: [userId, name, handle, avatarColor]
+      properties:
+        userId: { type: string, format: uuid }
+        name: { type: string }
+        handle: { type: string }
+        avatarColor: { type: string }
+        avatarUrl: { type: string, nullable: true }
+
+    Friend:
+      allOf:
+        - $ref: '#/components/schemas/FriendUserPreview'
+        - type: object
+          required: [since]
+          properties:
+            since: { type: string, format: date-time }
+
+    SearchResult:
+      allOf:
+        - $ref: '#/components/schemas/FriendUserPreview'
+        - type: object
+          required: [phone, relationship, requestId]
+          properties:
+            phone: { type: string }
+            relationship:
+              type: string
+              enum: [none, friend, request_outgoing, request_incoming]
+            requestId:
+              type: string
+              format: uuid
+              nullable: true
+              description: 'Set iff `relationship` is `request_outgoing` or `request_incoming`.'
+
+    FriendRequest:
+      type: object
+      required: [id, direction, status, counterparty, message, createdAt, respondedAt]
+      properties:
+        id: { type: string, format: uuid }
+        direction: { type: string, enum: [incoming, outgoing] }
+        status:
+          type: string
+          enum: [PENDING, ACCEPTED, DECLINED, CANCELLED]
+        counterparty: { $ref: '#/components/schemas/FriendUserPreview' }
+        message: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        respondedAt: { type: string, format: date-time, nullable: true }
+
+    PaginationMeta:
+      type: object
+      required: [page, pageSize, total]
+      properties:
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
+
+    Envelope_FriendList:
+      type: object
+      required: [success, data, meta]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Friend' }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+
+    Envelope_SearchResults:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/SearchResult' }
+
+    Envelope_RequestList:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: object
+          required: [incoming, outgoing]
+          properties:
+            incoming:
+              type: array
+              items: { $ref: '#/components/schemas/FriendRequest' }
+            outgoing:
+              type: array
+              items: { $ref: '#/components/schemas/FriendRequest' }
+
+    Envelope_Request:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data: { $ref: '#/components/schemas/FriendRequest' }
+
+    ErrorEnvelope:
+      type: object
+      required: [success, error]
+      properties:
+        success: { type: boolean, enum: [false] }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+
+  responses:
+    Unauthorized:
+      description: Missing / invalid / expired access token.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Forbidden:
+      description: Authenticated but not allowed (e.g. not the request recipient).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    ValidationError:
+      description: Request failed Zod validation.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }

@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: splitzy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: splitzy
+      POSTGRES_PASSWORD: splitzy
+      POSTGRES_DB: splitzy
+    ports:
+      - '5432:5432'
+    volumes:
+      - splitzy-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U splitzy -d splitzy']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: splitzy-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      API_PREFIX: /api/v1
+      DATABASE_URL: postgresql://splitzy:splitzy@postgres:5432/splitzy?schema=public
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-please-use-32-chars-min}
+      JWT_ACCESS_EXPIRES_IN: 15m
+      JWT_REFRESH_EXPIRES_IN: 30d
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      RATE_LIMIT_WINDOW_MS: 60000
+      RATE_LIMIT_MAX: 100
+      LOG_LEVEL: info
+    ports:
+      - '4000:4000'
+
+volumes:
+  splitzy-pgdata:

@@ -1,0 +1,349 @@
+openapi: 3.1.0
+info:
+  title: Splitzy — Expenses + Balances API
+  description: |
+    Expense CRUD + per-trip balance computation. After this step, the
+    backend is the single source of truth for balances, splits, and
+    settlement suggestions — the frontend stops computing locally.
+
+    **Money:** every amount is an integer in paise (₹1 = 100 paise).
+    Floats are never accepted nor returned.
+
+    **Equal split (MVP only):** the per-expense share is `floor(amount/n)`
+    for non-payers; the payer absorbs the remainder so SUM(shares) ===
+    amount exactly.
+
+    **Determinism:** for the same set of expenses + members, the balances
+    endpoint returns the same per-member net and the same simplified
+    transfer list every call. Tie-breaks in the greedy simplifier are
+    by `userId` lexical ascending.
+  version: '0.1.0'
+
+servers:
+  - url: 'http://localhost:4000/api/v1'
+    description: Local dev
+
+tags:
+  - name: Expenses
+    description: Expense CRUD; soft-delete on remove.
+  - name: Balances
+    description: Per-trip net balances + suggested transfers.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /expenses:
+    post:
+      tags: [Expenses]
+      summary: Create an expense in a trip.
+      description: |
+        Caller must be a member of `tripId`. The payer must also be a
+        trip member; if `participantIds` is omitted, every current trip
+        member is a participant. The payer must be in the participant
+        list (equal-split semantics).
+
+        Returns the new expense with the per-participant `sharePaise` so
+        the client can render the row immediately.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateExpenseRequest'
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Expense'
+        '400':
+          description: Caller / payer / participants misconfigured.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Caller is not a member of the trip.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /expenses/{expenseId}:
+    parameters:
+      - in: path
+        name: expenseId
+        required: true
+        schema: { type: string, format: uuid }
+
+    delete:
+      tags: [Expenses]
+      summary: Soft-delete an expense.
+      description: |
+        Allowed for the expense's payer or the trip's owner. The deleted
+        expense is excluded from `/trips/:tripId/expenses` and from the
+        balances computation. Participants and amount are preserved for
+        audit.
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Caller is neither the payer nor the trip owner.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /trips/{tripId}/expenses:
+    parameters:
+      - in: path
+        name: tripId
+        required: true
+        schema: { type: string, format: uuid }
+      - in: query
+        name: page
+        schema: { type: integer, minimum: 1, default: 1 }
+      - in: query
+        name: pageSize
+        schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+    get:
+      tags: [Expenses]
+      summary: List expenses for a trip (member only).
+      description: |
+        Sorted by `spentAt` desc (then `createdAt` desc as tie-break).
+        Each row carries `canDelete: true` if the caller is the payer or
+        the trip owner — saves a per-row check on the client.
+      responses:
+        '200':
+          description: Page of expenses.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_ExpenseList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Trip not found, or caller is not a member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /trips/{tripId}/balances:
+    parameters:
+      - in: path
+        name: tripId
+        required: true
+        schema: { type: string, format: uuid }
+
+    get:
+      tags: [Balances]
+      summary: Per-trip balance summary (member only).
+      description: |
+        Recomputes from the database on every call. Guarantees:
+          - SUM(members[*].netPaise) === 0
+          - SUM(suggestedTransfers[*].amountPaise) ===
+            SUM(positive netPaise across members)
+          - Number of suggested transfers ≤ max(creditors, debtors)
+
+        `members` includes everyone currently on the trip, plus anyone
+        with residual balance from before they were removed
+        (`isCurrentMember: false`). `suggestedTransfers` is a greedy
+        minimum-transfer simplification with deterministic tie-breaks.
+
+        `totalReimbursedPaise` is always 0 in this step — settlement
+        APIs ship in Step 5.
+      responses:
+        '200':
+          description: Balance summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_BalanceSummary'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    # ── Requests ─────────────────────────────────────────────────────────
+    CreateExpenseRequest:
+      type: object
+      required: [tripId, title, amountPaise, paidByUserId, spentAt]
+      properties:
+        tripId: { type: string, format: uuid }
+        title: { type: string, minLength: 1, maxLength: 120 }
+        amountPaise:
+          type: integer
+          minimum: 1
+          maximum: 100000000000
+          description: 'Total amount in paise. Always a positive integer; never floats.'
+        paidByUserId: { type: string, format: uuid }
+        participantIds:
+          type: array
+          minItems: 1
+          items: { type: string, format: uuid }
+          description: |
+            Optional. Defaults to every current trip member. If supplied,
+            the payer must appear in the list.
+        category:
+          type: string
+          enum: [STAY, FOOD, TRAVEL, FUN, MISC]
+          default: MISC
+        spentAt: { type: string, format: date-time }
+
+    # ── Projections ──────────────────────────────────────────────────────
+    UserPreview:
+      type: object
+      required: [userId, name, avatarColor]
+      properties:
+        userId: { type: string, format: uuid }
+        name: { type: string }
+        avatarColor: { type: string }
+        avatarUrl: { type: string, nullable: true }
+
+    ExpenseParticipant:
+      allOf:
+        - $ref: '#/components/schemas/UserPreview'
+        - type: object
+          required: [sharePaise]
+          properties:
+            sharePaise: { type: integer, minimum: 0 }
+
+    Expense:
+      type: object
+      required:
+        [id, tripId, title, amountPaise, category, splitType,
+         paidBy, participants, spentAt, createdAt, updatedAt, canDelete]
+      properties:
+        id: { type: string, format: uuid }
+        tripId: { type: string, format: uuid }
+        title: { type: string }
+        amountPaise: { type: integer, minimum: 1 }
+        category: { type: string, enum: [STAY, FOOD, TRAVEL, FUN, MISC] }
+        splitType: { type: string, enum: [EQUAL] }
+        paidBy: { $ref: '#/components/schemas/UserPreview' }
+        participants:
+          type: array
+          items: { $ref: '#/components/schemas/ExpenseParticipant' }
+        spentAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        canDelete:
+          type: boolean
+          description: 'True iff the requesting user is the payer or the trip owner.'
+
+    MemberBalance:
+      allOf:
+        - $ref: '#/components/schemas/UserPreview'
+        - type: object
+          required: [netPaise, totalPaidPaise, totalSharePaise, isCurrentMember]
+          properties:
+            netPaise:
+              type: integer
+              description: '> 0: is owed; < 0: owes; 0: settled.'
+            totalPaidPaise: { type: integer, minimum: 0 }
+            totalSharePaise: { type: integer, minimum: 0 }
+            isCurrentMember:
+              type: boolean
+              description: 'False if the user has been removed from the trip but still has expense activity.'
+
+    SettlementSuggestion:
+      type: object
+      required: [fromUserId, toUserId, amountPaise]
+      properties:
+        fromUserId: { type: string, format: uuid }
+        toUserId: { type: string, format: uuid }
+        amountPaise: { type: integer, minimum: 1 }
+
+    BalanceSummary:
+      type: object
+      required: [totalAmountPaise, totalReimbursedPaise, members, suggestedTransfers]
+      properties:
+        totalAmountPaise: { type: integer, minimum: 0 }
+        totalReimbursedPaise:
+          type: integer
+          minimum: 0
+          description: 'Always 0 until the Settlement APIs ship in Step 5.'
+        members:
+          type: array
+          items: { $ref: '#/components/schemas/MemberBalance' }
+        suggestedTransfers:
+          type: array
+          items: { $ref: '#/components/schemas/SettlementSuggestion' }
+
+    PaginationMeta:
+      type: object
+      required: [page, pageSize, total]
+      properties:
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
+
+    # ── Envelopes ────────────────────────────────────────────────────────
+    Envelope_Expense:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data: { $ref: '#/components/schemas/Expense' }
+
+    Envelope_ExpenseList:
+      type: object
+      required: [success, data, meta]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Expense' }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+
+    Envelope_BalanceSummary:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data: { $ref: '#/components/schemas/BalanceSummary' }
+
+    ErrorEnvelope:
+      type: object
+      required: [success, error]
+      properties:
+        success: { type: boolean, enum: [false] }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+
+  responses:
+    Unauthorized:
+      description: Missing / invalid / expired access token.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    NotFound:
+      description: Resource not found, or caller is not a trip member.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    ValidationError:
+      description: Request failed Zod validation.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }

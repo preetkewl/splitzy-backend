@@ -1,0 +1,231 @@
+openapi: 3.1.0
+info:
+  title: Splitzy — Settlements API
+  description: |
+    Persisted, immutable settlement ledger. After this step the balances
+    endpoint nets completed settlements out of expense-derived balances.
+
+    **Money:** integer paise. Same convention as expenses.
+
+    **Immutability:** settlements have no PATCH or DELETE endpoint. Once
+    a settlement is recorded, it stays. The `status` enum
+    (PENDING / COMPLETED / CANCELLED) is reserved for future async-UPI
+    flows; this step always writes COMPLETED.
+
+    **Balance integration:** the `/trips/:tripId/balances` endpoint
+    (Expense module) now subtracts each completed settlement from the
+    payer's debt and the receiver's credit:
+    ```
+    net[u] = SUM(paid as expense payer)
+           − SUM(share owed as expense participant)
+           + SUM(amount paid as settlement payer)
+           − SUM(amount received as settlement receiver)
+    ```
+    SUM(net) === 0 still holds, by construction.
+  version: '0.1.0'
+
+servers:
+  - url: 'http://localhost:4000/api/v1'
+    description: Local dev
+
+tags:
+  - name: Settlements
+    description: Money-movement ledger. Immutable.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /settlements:
+    post:
+      tags: [Settlements]
+      summary: Record a settlement (money movement) between two trip members.
+      description: |
+        Caller must be a trip member. Both `fromUserId` and `toUserId`
+        must also be members of the trip. The pair must be distinct.
+        `amountPaise` is a positive integer.
+
+        `externalRef` is reserved for future reconciliation (e.g. UPI
+        transaction ID). It's stored as-is — the server does not verify
+        anything against external systems.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSettlementRequest'
+      responses:
+        '201':
+          description: Settlement recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Settlement'
+        '400':
+          description: Self-settlement, non-member party, or zero amount.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Caller is not a member of `tripId`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /trips/{tripId}/settlements:
+    parameters:
+      - in: path
+        name: tripId
+        required: true
+        schema: { type: string, format: uuid }
+      - in: query
+        name: page
+        schema: { type: integer, minimum: 1, default: 1 }
+      - in: query
+        name: pageSize
+        schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+    get:
+      tags: [Settlements]
+      summary: Settlement history for a trip (member only).
+      description: |
+        Returns the trip's settlement history sorted newest first by
+        `settledAt` (with `createdAt` as tiebreak). Pagination meta is
+        included for clients that may render long ledgers.
+      responses:
+        '200':
+          description: Page of settlements.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_SettlementList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Trip not found, or caller is not a member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    CreateSettlementRequest:
+      type: object
+      required: [tripId, fromUserId, toUserId, amountPaise]
+      properties:
+        tripId: { type: string, format: uuid }
+        fromUserId:
+          type: string
+          format: uuid
+          description: 'User who paid (debt holder).'
+        toUserId:
+          type: string
+          format: uuid
+          description: 'User who received (creditor).'
+        amountPaise:
+          type: integer
+          minimum: 1
+          maximum: 100000000000
+        method:
+          type: string
+          enum: [UPI, CASH, MANUAL]
+          default: UPI
+        note: { type: string, maxLength: 280, nullable: true }
+        externalRef:
+          type: string
+          maxLength: 120
+          nullable: true
+          description: 'Optional provider-supplied reference (e.g. UPI tx id). Stored verbatim; not verified server-side.'
+
+    UserPreview:
+      type: object
+      required: [userId, name, avatarColor]
+      properties:
+        userId: { type: string, format: uuid }
+        name: { type: string }
+        avatarColor: { type: string }
+        avatarUrl: { type: string, nullable: true }
+
+    Settlement:
+      type: object
+      required:
+        [id, tripId, amountPaise, status, method, fromUser, toUser,
+         createdById, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        tripId: { type: string, format: uuid }
+        amountPaise: { type: integer, minimum: 1 }
+        status:
+          type: string
+          enum: [PENDING, COMPLETED, CANCELLED]
+        method:
+          type: string
+          enum: [UPI, CASH, MANUAL]
+        note: { type: string, nullable: true }
+        externalRef: { type: string, nullable: true }
+        settledAt: { type: string, format: date-time, nullable: true }
+        fromUser: { $ref: '#/components/schemas/UserPreview' }
+        toUser: { $ref: '#/components/schemas/UserPreview' }
+        createdById: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+
+    PaginationMeta:
+      type: object
+      required: [page, pageSize, total]
+      properties:
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
+
+    Envelope_Settlement:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data: { $ref: '#/components/schemas/Settlement' }
+
+    Envelope_SettlementList:
+      type: object
+      required: [success, data, meta]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Settlement' }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+
+    ErrorEnvelope:
+      type: object
+      required: [success, error]
+      properties:
+        success: { type: boolean, enum: [false] }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+
+  responses:
+    Unauthorized:
+      description: Missing / invalid / expired access token.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    ValidationError:
+      description: Request failed Zod validation.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }

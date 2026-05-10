@@ -1,0 +1,315 @@
+// Splitzy — backend Prisma schema.
+//
+// Money is stored as INTEGER paise (₹1 = 100 paise). Never use Float/Decimal
+// for amounts — the Flutter client sends and renders ints, and SUM aggregates
+// must round-trip exactly.
+//
+// All primary keys are UUIDs (Postgres-native `uuid` via @db.Uuid). UUIDs are
+// generated app-side via Prisma's @default(uuid()) so we don't depend on the
+// pgcrypto extension being present in every environment.
+//
+// Soft-delete is opt-in. Tables that hold history users care about
+// (User, Trip, Expense) carry `deletedAt`. Pure join/transactional rows
+// (TripMember, ExpenseParticipant, FriendRequest, Friendship, Settlement,
+// RefreshToken) are hard-deleted or use a status enum.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Enums
+// ──────────────────────────────────────────────────────────────────────────────
+
+enum TripMemberRole {
+  OWNER
+  MEMBER
+}
+
+enum ExpenseCategory {
+  STAY
+  FOOD
+  TRAVEL
+  FUN
+  MISC
+}
+
+/// Reserved enum. Only EQUAL is implemented for MVP. The column exists so
+/// future split modes (EXACT, PERCENT, SHARES) ship without a migration.
+enum ExpenseSplitType {
+  EQUAL
+}
+
+enum FriendRequestStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CANCELLED
+}
+
+enum SettlementStatus {
+  PENDING
+  COMPLETED
+  CANCELLED
+}
+
+enum SettlementMethod {
+  UPI
+  CASH
+  MANUAL
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// User & Auth
+// ──────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id           String  @id @default(uuid()) @db.Uuid
+  email        String? @unique
+  phone        String  @unique
+  /// Public username without leading "@". Indexed for friend search.
+  handle       String  @unique
+  name         String
+  /// Hex deterministic from id at signup. Stored so the avatar stays
+  /// stable if the derivation rule changes later.
+  avatarColor  String
+  avatarUrl    String?
+  upiId        String?
+  /// Null for OAuth-only accounts. Bcrypt/argon2 in step 2.
+  passwordHash String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  refreshTokens          RefreshToken[]
+  ownedTrips             Trip[]               @relation("TripCreator")
+  memberships            TripMember[]
+  expensesPaid           Expense[]            @relation("ExpensePayer")
+  expensesCreated        Expense[]            @relation("ExpenseCreator")
+  expenseParticipations  ExpenseParticipant[]
+  settlementsFrom        Settlement[]         @relation("SettlementFrom")
+  settlementsTo          Settlement[]         @relation("SettlementTo")
+  settlementsCreated     Settlement[]         @relation("SettlementCreator")
+  friendRequestsSent     FriendRequest[]      @relation("FriendRequestSender")
+  friendRequestsReceived FriendRequest[]      @relation("FriendRequestReceiver")
+  friendshipsAsA         Friendship[]         @relation("FriendshipUserA")
+  friendshipsAsB         Friendship[]         @relation("FriendshipUserB")
+
+  @@index([deletedAt])
+  @@index([name])
+  @@map("users")
+}
+
+/// Server-side rotating refresh tokens. Access tokens stay JWT-only.
+/// `tokenHash` stores SHA-256(plaintext) — we never persist the raw token.
+model RefreshToken {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @db.Uuid
+  tokenHash  String    @unique
+  /// Optional metadata for session listing / revocation UX.
+  userAgent  String?
+  ipAddress  String?
+  expiresAt  DateTime
+  revokedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Trips
+// ──────────────────────────────────────────────────────────────────────────────
+
+model Trip {
+  id          String  @id @default(uuid()) @db.Uuid
+  name        String
+  emoji       String
+  /// Hex (e.g. "#EAD9A8"). Picked at creation from a small palette.
+  coverColor  String
+  /// Optional free-text trip note. Capped at 500 chars at the validation layer.
+  description String?
+  createdById String  @db.Uuid
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  createdBy   User         @relation("TripCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  members     TripMember[]
+  expenses    Expense[]
+  settlements Settlement[]
+
+  @@index([createdById])
+  @@index([deletedAt])
+  @@map("trips")
+}
+
+/// Bridge table for the many-to-many between User and Trip.
+/// `role` distinguishes the trip creator from regular members; the schema
+/// supports promotion later without a migration.
+model TripMember {
+  id     String         @id @default(uuid()) @db.Uuid
+  tripId String         @db.Uuid
+  userId String         @db.Uuid
+  role   TripMemberRole @default(MEMBER)
+
+  joinedAt  DateTime  @default(now())
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  trip Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([tripId, userId])
+  @@index([userId])
+  @@map("trip_members")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Expenses
+// ──────────────────────────────────────────────────────────────────────────────
+
+model Expense {
+  id          String           @id @default(uuid()) @db.Uuid
+  tripId      String           @db.Uuid
+  title       String
+  /// Total amount in paise. Always positive.
+  amountPaise Int
+  category    ExpenseCategory  @default(MISC)
+  splitType   ExpenseSplitType @default(EQUAL)
+  paidById    String           @db.Uuid
+  createdById String           @db.Uuid
+  /// User-supplied date for the expense (the receipt date), distinct from createdAt.
+  spentAt     DateTime
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  trip         Trip                 @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  paidBy       User                 @relation("ExpensePayer", fields: [paidById], references: [id], onDelete: Restrict)
+  createdBy    User                 @relation("ExpenseCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  participants ExpenseParticipant[]
+
+  @@index([tripId, spentAt(sort: Desc)])
+  @@index([paidById])
+  @@index([deletedAt])
+  @@map("expenses")
+}
+
+/// One row per (expense, participant) — the share each member owes for a
+/// given expense. For EQUAL splits, share = floor(amount/n) for everyone
+/// except the payer who absorbs the remainder. Sum(sharePaise) == amountPaise.
+model ExpenseParticipant {
+  id         String @id @default(uuid()) @db.Uuid
+  expenseId  String @db.Uuid
+  userId     String @db.Uuid
+  sharePaise Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([expenseId, userId])
+  @@index([userId])
+  @@map("expense_participants")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Settlements
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A real, persisted money movement between two trip members. Distinct from
+/// the *suggested* greedy transfers, which are computed on-the-fly from
+/// expenses + existing settlements. Marking a suggested transfer "paid"
+/// inserts a row here with status=COMPLETED.
+model Settlement {
+  id          String           @id @default(uuid()) @db.Uuid
+  tripId      String           @db.Uuid
+  fromUserId  String           @db.Uuid
+  toUserId    String           @db.Uuid
+  amountPaise Int
+  status      SettlementStatus @default(COMPLETED)
+  method      SettlementMethod @default(UPI)
+  note        String?
+  /// Provider-supplied reference (e.g. UPI tx id). Free-form; not verified
+  /// server-side — reserved for future reconciliation.
+  externalRef String?
+  /// When the money actually moved (may differ from createdAt if recorded later).
+  settledAt   DateTime?
+  /// Who recorded the settlement (usually the payer).
+  createdById String           @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  trip      Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  fromUser  User @relation("SettlementFrom", fields: [fromUserId], references: [id], onDelete: Restrict)
+  toUser    User @relation("SettlementTo", fields: [toUserId], references: [id], onDelete: Restrict)
+  createdBy User @relation("SettlementCreator", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([tripId, status])
+  @@index([fromUserId])
+  @@index([toUserId])
+  @@map("settlements")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Friends
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Directional pending request (A → B). Once accepted, a row is moved into
+/// `Friendship` and this row's status becomes ACCEPTED (kept for audit).
+model FriendRequest {
+  id          String              @id @default(uuid()) @db.Uuid
+  fromUserId  String              @db.Uuid
+  toUserId    String              @db.Uuid
+  status      FriendRequestStatus @default(PENDING)
+  message     String?
+  respondedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  fromUser User @relation("FriendRequestSender", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser   User @relation("FriendRequestReceiver", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@unique([fromUserId, toUserId])
+  @@index([toUserId, status])
+  @@index([fromUserId, status])
+  @@map("friend_requests")
+}
+
+/// Bidirectional friendship. Stored once with the canonical ordering
+/// userAId < userBId (string compare on UUIDs) so we never have duplicate
+/// rows representing the same pair.
+model Friendship {
+  id      String @id @default(uuid()) @db.Uuid
+  userAId String @db.Uuid
+  userBId String @db.Uuid
+
+  since     DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userA User @relation("FriendshipUserA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB User @relation("FriendshipUserB", fields: [userBId], references: [id], onDelete: Cascade)
+
+  @@unique([userAId, userBId])
+  @@index([userBId])
+  @@map("friendships")
+}

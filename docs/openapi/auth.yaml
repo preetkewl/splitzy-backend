@@ -1,0 +1,349 @@
+openapi: 3.1.0
+info:
+  title: Splitzy — Auth API
+  description: |
+    Phone-based authentication with mock OTP for the Splitzy backend.
+
+    **Token model**
+    - **Access token**: short-lived JWT, sent as `Authorization: Bearer <token>` on protected requests.
+    - **Refresh token**: long-lived JWT, hashed and stored server-side. Rotated on every `/auth/refresh` call.
+    - **Challenge token**: short-lived JWT bound to a phone + OTP-provider challenge id. Returned by `/auth/login` and submitted to `/auth/verify`.
+
+    **Mock OTP (dev only)**
+    The `MockOtpProvider` accepts `123456` as the OTP. In non-production, `/auth/login` echoes the OTP in `devOtp` for autofill convenience.
+  version: '0.1.0'
+
+servers:
+  - url: 'http://localhost:4000/api/v1'
+    description: Local dev
+
+tags:
+  - name: Auth
+    description: Login, OTP verification, session management, profile.
+
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Start an OTP challenge for a phone number.
+      description: |
+        Initiates an OTP delivery via the configured provider. Returns a
+        signed `challengeToken` to submit alongside the OTP at `/auth/verify`.
+        The user is **not** created yet — that happens after successful OTP verification.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Challenge issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_LoginResponse'
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/verify:
+    post:
+      tags: [Auth]
+      summary: Verify the OTP and issue a session.
+      description: |
+        Validates the OTP against the provider. On success:
+        - Looks up the user by phone, creating one if absent (with an empty `name` and an auto-generated `handle`).
+        - Issues an access token and a refresh token (the refresh token is hashed before storage).
+        - Returns the user with `profileComplete` set based on whether `name` is filled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyRequest'
+      responses:
+        '200':
+          description: Session established.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_AuthSession'
+        '401':
+          description: Invalid OTP or challenge token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate the refresh token and re-issue an access token.
+      description: |
+        Verifies the JWT signature and confirms the token's hash exists,
+        is not revoked, and is not expired. On success, revokes the supplied
+        refresh token and issues a fresh `(access, refresh)` pair. **The
+        old refresh token is single-use** — replaying it returns 401.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: New token pair.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_RefreshResponse'
+        '401':
+          description: Unknown / revoked / expired refresh token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke a refresh token (sign out this device).
+      description: |
+        Hashes the supplied refresh token and marks the matching DB row as
+        revoked. Idempotent — a missing or unknown token is a no-op.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+      responses:
+        '204': { description: Logged out. }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Return the authenticated user's profile.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_User'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/profile:
+    put:
+      tags: [Auth]
+      summary: Update the authenticated user's profile.
+      description: |
+        Partial update — supply only the fields that should change. Setting
+        `name` to a value of length ≥ 2 transitions `profileComplete` to
+        `true`. The `handle` must be unique across users.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+      responses:
+        '200':
+          description: Updated user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_User'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: Handle already taken.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    # ── Requests ───────────────────────────────────────────────────────────
+    LoginRequest:
+      type: object
+      required: [phone]
+      properties:
+        phone:
+          type: string
+          example: '+919876512345'
+          description: 'E.164 format. Spaces are stripped server-side.'
+
+    VerifyRequest:
+      type: object
+      required: [challengeToken, otp]
+      properties:
+        challengeToken: { type: string }
+        otp:
+          type: string
+          minLength: 6
+          maxLength: 6
+          example: '123456'
+
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken: { type: string }
+
+    LogoutRequest:
+      type: object
+      properties:
+        refreshToken: { type: string }
+
+    UpdateProfileRequest:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 2, maxLength: 64 }
+        handle:
+          type: string
+          minLength: 3
+          maxLength: 30
+          pattern: '^[a-z0-9_]+$'
+        avatarColor: { type: string, pattern: '^#[0-9a-fA-F]{6}$' }
+        upiId: { type: string, nullable: true, example: 'aarya@okhdfcbank' }
+        avatarUrl: { type: string, format: uri, nullable: true }
+
+    # ── Responses ──────────────────────────────────────────────────────────
+    LoginResponse:
+      type: object
+      required: [challengeToken, expiresAt]
+      properties:
+        challengeToken: { type: string }
+        expiresAt: { type: string, format: date-time }
+        devOtp:
+          type: string
+          description: 'Only present in non-production for the mock provider.'
+
+    User:
+      type: object
+      required: [id, phone, handle, name, avatarColor, profileComplete, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        phone: { type: string }
+        handle: { type: string }
+        name: { type: string }
+        avatarColor: { type: string }
+        avatarUrl: { type: string, nullable: true }
+        upiId: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        profileComplete: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    AuthSession:
+      type: object
+      required: [user, accessToken, accessTokenExpiresAt, refreshToken, refreshTokenExpiresAt]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        accessToken: { type: string }
+        accessTokenExpiresAt: { type: string, format: date-time }
+        refreshToken: { type: string }
+        refreshTokenExpiresAt: { type: string, format: date-time }
+
+    RefreshResponse:
+      type: object
+      required: [accessToken, accessTokenExpiresAt, refreshToken, refreshTokenExpiresAt]
+      properties:
+        accessToken: { type: string }
+        accessTokenExpiresAt: { type: string, format: date-time }
+        refreshToken: { type: string }
+        refreshTokenExpiresAt: { type: string, format: date-time }
+
+    # ── Envelopes ──────────────────────────────────────────────────────────
+    Envelope_LoginResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data: { $ref: '#/components/schemas/LoginResponse' }
+
+    Envelope_AuthSession:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data: { $ref: '#/components/schemas/AuthSession' }
+
+    Envelope_RefreshResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data: { $ref: '#/components/schemas/RefreshResponse' }
+
+    Envelope_User:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data: { $ref: '#/components/schemas/User' }
+
+    ErrorEnvelope:
+      type: object
+      required: [success, error]
+      properties:
+        success: { type: boolean, enum: [false] }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - VALIDATION_FAILED
+                - UNAUTHORIZED
+                - FORBIDDEN
+                - NOT_FOUND
+                - CONFLICT
+                - RATE_LIMITED
+                - INTERNAL_ERROR
+                - BAD_REQUEST
+                - INVALID_CREDENTIALS
+                - INVALID_TOKEN
+                - TOKEN_EXPIRED
+                - HANDLE_TAKEN
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+
+  responses:
+    ValidationError:
+      description: Request body failed Zod validation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Unauthorized:
+      description: Missing / invalid / expired access token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    RateLimited:
+      description: Too many auth attempts from this IP.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'

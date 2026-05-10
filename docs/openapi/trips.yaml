@@ -1,0 +1,384 @@
+openapi: 3.1.0
+info:
+  title: Splitzy — Trips API
+  description: |
+    Trips, trip members, and per-trip metadata. All endpoints require a
+    valid access token (`Authorization: Bearer <jwt>`). Mutations are
+    further gated by ownership: only the trip's `OWNER` can update,
+    delete, or change membership.
+
+    **404 vs 403.** Non-members get a 404 on detail and mutation routes,
+    not a 403 — leaking trip existence to non-members would let an
+    attacker enumerate IDs.
+  version: '0.1.0'
+
+servers:
+  - url: 'http://localhost:4000/api/v1'
+    description: Local dev
+
+tags:
+  - name: Trips
+    description: Trip CRUD and member management.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /trips:
+    post:
+      tags: [Trips]
+      summary: Create a trip.
+      description: |
+        Authenticated user becomes `OWNER` automatically. `memberIds` may
+        contain additional userIds to add as `MEMBER`s; duplicates are
+        deduped, and the creator is dropped if echoed in the array. All
+        member rows are inserted in a single transaction with the trip.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTripRequest'
+      responses:
+        '201':
+          description: Trip created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_TripDetail'
+        '400':
+          description: One or more memberIds reference users that do not exist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+    get:
+      tags: [Trips]
+      summary: List trips the authenticated user is a member of.
+      description: |
+        Sorted by `updatedAt` desc. Each row includes member previews
+        (name + avatar + role), totals, and the latest expense timestamp.
+        All aggregates are computed in a single `groupBy` query — no N+1.
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: Page of trips.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_TripList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /trips/{tripId}:
+    parameters:
+      - $ref: '#/components/parameters/TripId'
+
+    get:
+      tags: [Trips]
+      summary: Get a trip by id.
+      description: Returns the full trip with members and a balance summary placeholder.
+      responses:
+        '200':
+          description: Trip detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_TripDetail'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+    patch:
+      tags: [Trips]
+      summary: Partially update a trip (owner only).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTripRequest'
+      responses:
+        '200':
+          description: Updated trip.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_TripDetail'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Only the trip owner can update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+    delete:
+      tags: [Trips]
+      summary: Soft-delete a trip (owner only).
+      description: Sets `deletedAt`. Members and expense history are preserved for audit.
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /trips/{tripId}/members:
+    parameters:
+      - $ref: '#/components/parameters/TripId'
+
+    post:
+      tags: [Trips]
+      summary: Add members to a trip (owner only).
+      description: |
+        Idempotent — userIds already in the trip are silently skipped.
+        Returns the touched (existing or newly inserted) member rows so
+        the client can refresh its local state in one round-trip.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddMembersRequest'
+      responses:
+        '200':
+          description: Added members.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_MemberList'
+        '400':
+          description: One or more userIds reference users that do not exist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /trips/{tripId}/members/{memberId}:
+    parameters:
+      - $ref: '#/components/parameters/TripId'
+      - in: path
+        name: memberId
+        required: true
+        schema: { type: string, format: uuid }
+
+    delete:
+      tags: [Trips]
+      summary: Remove a member from a trip (owner only).
+      description: |
+        The trip owner cannot be removed — attempting it returns 403.
+      responses:
+        '204': { description: Removed. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Member not removable (e.g. is the owner) or caller is not owner.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Trip not found, or that user is not a member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    TripId:
+      in: path
+      name: tripId
+      required: true
+      schema: { type: string, format: uuid }
+
+  schemas:
+    # ── Requests ─────────────────────────────────────────────────────────
+    CreateTripRequest:
+      type: object
+      required: [name, emoji]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        emoji: { type: string, minLength: 1, maxLength: 8 }
+        coverColor:
+          type: string
+          pattern: '^#[0-9a-fA-F]{6}$'
+          description: 'Optional. Server picks from a fixed palette if omitted.'
+        description: { type: string, maxLength: 500, nullable: true }
+        memberIds:
+          type: array
+          items: { type: string, format: uuid }
+          maxItems: 50
+
+    UpdateTripRequest:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        emoji: { type: string, minLength: 1, maxLength: 8 }
+        coverColor: { type: string, pattern: '^#[0-9a-fA-F]{6}$' }
+        description: { type: string, maxLength: 500, nullable: true }
+
+    AddMembersRequest:
+      type: object
+      required: [userIds]
+      properties:
+        userIds:
+          type: array
+          minItems: 1
+          items: { type: string, format: uuid }
+
+    # ── Member projections ───────────────────────────────────────────────
+    TripMemberPreview:
+      type: object
+      required: [userId, name, avatarColor, role]
+      properties:
+        userId: { type: string, format: uuid }
+        name: { type: string }
+        avatarColor: { type: string }
+        avatarUrl: { type: string, nullable: true }
+        role: { type: string, enum: [OWNER, MEMBER] }
+
+    TripMember:
+      type: object
+      required: [userId, name, handle, avatarColor, role, joinedAt]
+      properties:
+        userId: { type: string, format: uuid }
+        name: { type: string }
+        handle: { type: string }
+        avatarColor: { type: string }
+        avatarUrl: { type: string, nullable: true }
+        upiId: { type: string, nullable: true }
+        role: { type: string, enum: [OWNER, MEMBER] }
+        joinedAt: { type: string, format: date-time }
+
+    TripBalanceSummary:
+      type: object
+      required: [totalAmountPaise, settledAmountPaise, pendingAmountPaise]
+      properties:
+        totalAmountPaise: { type: integer }
+        settledAmountPaise: { type: integer }
+        pendingAmountPaise: { type: integer }
+
+    # ── Trip projections ─────────────────────────────────────────────────
+    TripSummary:
+      type: object
+      required:
+        [id, name, emoji, coverColor, isOwner, memberCount, members,
+         totalAmountPaise, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        emoji: { type: string }
+        coverColor: { type: string }
+        description: { type: string, nullable: true }
+        isOwner: { type: boolean }
+        memberCount: { type: integer }
+        members:
+          type: array
+          items: { $ref: '#/components/schemas/TripMemberPreview' }
+        totalAmountPaise: { type: integer }
+        latestExpenseAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    TripDetail:
+      allOf:
+        - $ref: '#/components/schemas/TripSummary'
+        - type: object
+          required: [members, balanceSummary]
+          properties:
+            members:
+              type: array
+              items: { $ref: '#/components/schemas/TripMember' }
+            balanceSummary: { $ref: '#/components/schemas/TripBalanceSummary' }
+
+    PaginationMeta:
+      type: object
+      required: [page, pageSize, total]
+      properties:
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
+
+    # ── Envelopes ────────────────────────────────────────────────────────
+    Envelope_TripDetail:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data: { $ref: '#/components/schemas/TripDetail' }
+
+    Envelope_TripList:
+      type: object
+      required: [success, data, meta]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/TripSummary' }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+
+    Envelope_MemberList:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/TripMember' }
+
+    ErrorEnvelope:
+      type: object
+      required: [success, error]
+      properties:
+        success: { type: boolean, enum: [false] }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+
+  responses:
+    Unauthorized:
+      description: Missing / invalid / expired access token.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Forbidden:
+      description: Authenticated but not allowed (e.g. not the trip owner).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    NotFound:
+      description: Trip not found, soft-deleted, or caller is not a member.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    ValidationError:
+      description: Request failed Zod validation.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
