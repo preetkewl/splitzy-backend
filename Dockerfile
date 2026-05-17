@@ -25,8 +25,8 @@ COPY . .
 
 RUN npx prisma generate
 RUN npm run build
-# Drop dev deps before copying node_modules into the runtime stage.
-RUN npm prune --production
+# NOTE: dev deps (prisma CLI, tsx) are kept in the runtime image so the
+# entrypoint can run `prisma db push` and `npm run db:seed` on startup.
 
 
 # ─── Stage 3: runtime ────────────────────────────────────────────────────────
@@ -50,6 +50,10 @@ COPY --from=build --chown=app:app /app/node_modules ./node_modules
 COPY --from=build --chown=app:app /app/dist ./dist
 COPY --from=build --chown=app:app /app/prisma ./prisma
 COPY --from=build --chown=app:app /app/package.json ./package.json
+# src/ is needed at runtime so `tsx prisma/seed.ts` can resolve its
+# `../src/...` imports during one-off seeding.
+COPY --from=build --chown=app:app /app/src ./src
+COPY --from=build --chown=app:app /app/scripts/render-entrypoint.sh ./scripts/render-entrypoint.sh
 
 USER app
 
@@ -60,4 +64,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:4000/api/v1/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "dist/server.js"]
+CMD ["/bin/sh", "/app/scripts/render-entrypoint.sh"]
