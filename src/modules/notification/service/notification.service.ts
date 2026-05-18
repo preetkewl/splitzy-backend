@@ -64,14 +64,15 @@ export class NotificationService {
       const invalidTokens: string[] = [];
       response.responses.forEach((r, idx) => {
         if (!r.success) {
+          const token = fcmTokens[idx]!;
           const code = r.error?.code ?? '';
           if (
             code === 'messaging/invalid-registration-token' ||
             code === 'messaging/registration-token-not-registered'
           ) {
-            invalidTokens.push(fcmTokens[idx]);
+            invalidTokens.push(token);
           } else {
-            logger.warn({ error: r.error?.message, token: fcmTokens[idx] }, 'FCM send failed');
+            logger.warn({ error: r.error?.message, token }, 'FCM send failed');
           }
         }
       });
