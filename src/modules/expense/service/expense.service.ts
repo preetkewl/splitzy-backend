@@ -3,6 +3,7 @@ import { ApiError } from '../../../core/api-error.js';
 import { paginate, type PaginationInput } from '../../../database/helpers.js';
 import { logger } from '../../../utils/logger.js';
 import type { IUserRepository } from '../../auth/repository/user.repository.js';
+import type { NotificationService } from '../../notification/service/notification.service.js';
 import type { ISettlementRepository } from '../../settlement/repository/settlement.repository.js';
 import type { ITripRepository, TripMemberWithUser } from '../../trip/repository/trip.repository.js';
 import { TripAccess } from '../../trip/service/access.js';
@@ -34,6 +35,7 @@ export class ExpenseService {
     private readonly trips: ITripRepository,
     private readonly users: IUserRepository,
     private readonly settlements: ISettlementRepository,
+    private readonly notifications: NotificationService,
   ) {
     this.access = new TripAccess(trips);
   }
@@ -102,6 +104,20 @@ export class ExpenseService {
       { expenseId: created.id, tripId: input.tripId, amountPaise: input.amountPaise },
       'expense created',
     );
+
+    // Notify all trip members except the payer.
+    const notifyUserIds = trip.members
+      .map((m) => m.userId)
+      .filter((id) => id !== input.paidByUserId);
+    if (notifyUserIds.length > 0) {
+      void this.notifications.sendToUsers(notifyUserIds, {
+        title: 'New expense added',
+        body: `${created.paidBy.name} added "${created.title}"`,
+        type: 'EXPENSE_ADDED',
+        data: { tripId: input.tripId, expenseId: created.id },
+      });
+    }
+
     return toExpenseDto(created, {
       viewerUserId: userId,
       tripOwnerId: trip.createdById,

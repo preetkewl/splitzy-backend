@@ -5,6 +5,7 @@ import { HTTP } from '../../../constants/http.js';
 import { paginate, type PaginationInput } from '../../../database/helpers.js';
 import { logger } from '../../../utils/logger.js';
 import type { IUserRepository } from '../../auth/repository/user.repository.js';
+import type { NotificationService } from '../../notification/service/notification.service.js';
 import { SEARCH_DEFAULT_LIMIT } from '../constants.js';
 import type {
   FriendDto,
@@ -34,6 +35,7 @@ export class FriendService {
   constructor(
     private readonly friends: IFriendRepository,
     private readonly users: IUserRepository,
+    private readonly notifications: NotificationService,
   ) {}
 
   // ── list ──────────────────────────────────────────────────────────────────
@@ -171,6 +173,14 @@ export class FriendService {
       { requestId: result.id, fromUserId, toUserId: input.targetUserId },
       'friend request sent',
     );
+
+    void this.notifications.sendToUser(input.targetUserId, {
+      title: 'New friend request',
+      body: `${result.fromUser.name} sent you a friend request`,
+      type: 'FRIEND_REQUEST',
+      data: { userId: fromUserId, requestId: result.id },
+    });
+
     return toFriendRequestDto(result, fromUserId);
   }
 
@@ -196,6 +206,15 @@ export class FriendService {
       { requestId, fromUserId: updated.fromUserId, toUserId: updated.toUserId },
       'friend request accepted',
     );
+
+    const accepter = await this.users.findById(userId);
+    void this.notifications.sendToUser(updated.fromUserId, {
+      title: 'Friend request accepted',
+      body: `${accepter?.name ?? 'Someone'} accepted your friend request`,
+      type: 'FRIEND_ACCEPTED',
+      data: { userId },
+    });
+
     return toFriendRequestDto(updated, userId);
   }
 

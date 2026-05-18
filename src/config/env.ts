@@ -16,6 +16,11 @@ const envSchema = z.object({
 
   CORS_ORIGINS: z.string().default('*'),
 
+  // Firebase Admin SDK — paste the entire service-account JSON as a single
+  // env var (no file required). Optional so the server still boots in envs
+  // without FCM configured; notification calls become no-ops in that case.
+  FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),
+
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
 

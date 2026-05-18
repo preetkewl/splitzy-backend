@@ -2,6 +2,7 @@ import type { Router } from 'express';
 import { prisma } from '../../database/prisma.js';
 import { UserRepository } from '../auth/repository/user.repository.js';
 import type { TokenService } from '../auth/service/token.service.js';
+import type { NotificationService } from '../notification/service/notification.service.js';
 import { FriendController } from './controller/friend.controller.js';
 import { FriendRepository } from './repository/friend.repository.js';
 import { createFriendRouter } from './routes/friend.routes.js';
@@ -12,10 +13,13 @@ export interface FriendModule {
   service: FriendService;
 }
 
-export function createFriendModule(deps: { tokens: TokenService }): FriendModule {
+export function createFriendModule(deps: {
+  tokens: TokenService;
+  notifications: NotificationService;
+}): FriendModule {
   const friendRepo = new FriendRepository(prisma);
   const userRepo = new UserRepository(prisma);
-  const service = new FriendService(friendRepo, userRepo);
+  const service = new FriendService(friendRepo, userRepo, deps.notifications);
   const controller = new FriendController(service);
   const router = createFriendRouter({ controller, tokens: deps.tokens });
   return { router, service };

@@ -3,6 +3,7 @@ import { createAuthModule } from '../modules/auth/index.js';
 import { createExpenseModule } from '../modules/expense/index.js';
 import { createFriendModule } from '../modules/friend/index.js';
 import { healthRouter } from '../modules/health/routes/health.routes.js';
+import { createNotificationModule } from '../modules/notification/index.js';
 import { createSettlementModule } from '../modules/settlement/index.js';
 import { createTripModule } from '../modules/trip/index.js';
 
@@ -14,15 +15,22 @@ import { createTripModule } from '../modules/trip/index.js';
 export function createApiRouter(): Router {
   const router = Router();
   const auth = createAuthModule();
+
+  // Notification module is built first — its service is injected into every
+  // other module that fires push notifications.
+  const notificationModule = createNotificationModule({ tokens: auth.tokens });
+  const { service: notifications } = notificationModule;
+
   const trips = createTripModule({ tokens: auth.tokens });
   // Settlements are built first so the Expense module can read from the
   // same repository when computing balances — no double-wiring.
-  const settlements = createSettlementModule({ tokens: auth.tokens });
+  const settlements = createSettlementModule({ tokens: auth.tokens, notifications });
   const expenses = createExpenseModule({
     tokens: auth.tokens,
     settlements: settlements.repository,
+    notifications,
   });
-  const friends = createFriendModule({ tokens: auth.tokens });
+  const friends = createFriendModule({ tokens: auth.tokens, notifications });
 
   router.use('/health', healthRouter);
   router.use('/auth', auth.router);
@@ -35,6 +43,7 @@ export function createApiRouter(): Router {
   router.use('/expenses', expenses.rootRouter);
   router.use('/settlements', settlements.rootRouter);
   router.use('/friends', friends.router);
+  router.use('/notifications', notificationModule.router);
 
   return router;
 }

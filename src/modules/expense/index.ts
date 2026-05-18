@@ -2,6 +2,7 @@ import type { Router } from 'express';
 import { prisma } from '../../database/prisma.js';
 import { UserRepository } from '../auth/repository/user.repository.js';
 import type { TokenService } from '../auth/service/token.service.js';
+import type { NotificationService } from '../notification/service/notification.service.js';
 import { SettlementRepository } from '../settlement/repository/settlement.repository.js';
 import type { ISettlementRepository } from '../settlement/repository/settlement.repository.js';
 import { TripRepository } from '../trip/repository/trip.repository.js';
@@ -25,12 +26,13 @@ export interface ExpenseModule {
 export function createExpenseModule(deps: {
   tokens: TokenService;
   settlements?: ISettlementRepository;
+  notifications: NotificationService;
 }): ExpenseModule {
   const expenseRepo = new ExpenseRepository(prisma);
   const tripRepo = new TripRepository(prisma);
   const userRepo = new UserRepository(prisma);
   const settlementRepo = deps.settlements ?? new SettlementRepository(prisma);
-  const service = new ExpenseService(expenseRepo, tripRepo, userRepo, settlementRepo);
+  const service = new ExpenseService(expenseRepo, tripRepo, userRepo, settlementRepo, deps.notifications);
   const controller = new ExpenseController(service);
   const { rootRouter, tripScopedRouter } = createExpenseRouters({
     controller,

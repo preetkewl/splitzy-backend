@@ -2,6 +2,7 @@ import { SettlementMethod } from '@prisma/client';
 import { ApiError } from '../../../core/api-error.js';
 import { paginate, type PaginationInput } from '../../../database/helpers.js';
 import { logger } from '../../../utils/logger.js';
+import type { NotificationService } from '../../notification/service/notification.service.js';
 import type { ITripRepository } from '../../trip/repository/trip.repository.js';
 import { TripAccess } from '../../trip/service/access.js';
 import type { CreateSettlementInput, SettlementDto } from '../dto/index.js';
@@ -21,6 +22,7 @@ export class SettlementService {
   constructor(
     private readonly settlements: ISettlementRepository,
     private readonly trips: ITripRepository,
+    private readonly notifications: NotificationService,
   ) {
     this.access = new TripAccess(trips);
   }
@@ -72,6 +74,15 @@ export class SettlementService {
       },
       'settlement recorded',
     );
+
+    // Notify the recipient that they received a payment.
+    void this.notifications.sendToUser(input.toUserId, {
+      title: 'Payment received',
+      body: `${created.fromUser.name} settled up with you`,
+      type: 'SETTLEMENT_RECEIVED',
+      data: { tripId: input.tripId, settlementId: created.id },
+    });
+
     return toSettlementDto(created);
   }
 
