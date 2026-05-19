@@ -13,12 +13,12 @@
  *   - delete by payer + delete by owner + non-payer non-owner forbidden
  *   - deleted expense disappears from list and balances
  */
+import { randomUUID } from 'node:crypto';
 import express from 'express';
 import { errorHandler, notFoundHandler } from '../src/middlewares/index.js';
 import { AuthController } from '../src/modules/auth/controller/auth.controller.js';
 import { createAuthRouter } from '../src/modules/auth/routes/auth.routes.js';
 import { AuthService } from '../src/modules/auth/service/auth.service.js';
-import { MockOtpProvider } from '../src/modules/auth/service/otp/mock-otp.provider.js';
 import { TokenService } from '../src/modules/auth/service/token.service.js';
 import { ExpenseController } from '../src/modules/expense/controller/expense.controller.js';
 import { createExpenseRouters } from '../src/modules/expense/routes/expense.routes.js';
@@ -33,10 +33,13 @@ import {
   FakeStore,
   FakeTripRepository,
   FakeUserRepository,
+  buildNotificationService,
 } from './lib/fakes.js';
 
 interface TestApp {
   fetchJson: (path: string, init?: RequestInit) => Promise<{ status: number; body: unknown }>;
+  store: FakeStore;
+  tokens: TokenService;
   close: () => Promise<void>;
 }
 
@@ -56,9 +59,9 @@ async function buildApp(): Promise<TestApp> {
   // fake's empty-list return keeps totalReimbursedPaise at 0.
   const settlementRepo = new FakeSettlementRepository(store);
 
-  const authService = new AuthService(userRepo, refreshRepo, new MockOtpProvider(), tokens);
+  const authService = new AuthService(userRepo, refreshRepo, tokens);
   const tripService = new TripService(tripRepo);
-  const expenseService = new ExpenseService(expenseRepo, tripRepo, userRepo, settlementRepo);
+  const expenseService = new ExpenseService(expenseRepo, tripRepo, userRepo, settlementRepo, buildNotificationService());
 
   const app = express();
   app.use(express.json());
@@ -77,6 +80,8 @@ async function buildApp(): Promise<TestApp> {
   const base = `http://127.0.0.1:${String(addr.port)}`;
 
   return {
+    store,
+    tokens,
     fetchJson: async (path, init) => {
       const res = await fetch(`${base}${path}`, init);
       const body = (await res.json().catch(() => null)) as unknown;
@@ -103,22 +108,18 @@ function isSuccess<T>(body: unknown): body is { success: true; data: T; meta?: u
   return typeof body === 'object' && body !== null && (body as { success?: unknown }).success === true;
 }
 
-async function signIn(app: TestApp, phone: string): Promise<{ token: string; userId: string }> {
-  const login = await app.fetchJson('/api/v1/auth/login', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ phone }),
+async function signIn(app: TestApp, uid: string): Promise<{ token: string; userId: string }> {
+  const repo = new FakeUserRepository(app.store);
+  const user = await repo.create({
+    firebaseUid: uid,
+    email: null,
+    name: 'Smoke User',
+    avatarUrl: null,
+    handle: `u_${randomUUID().replace(/-/g, '').slice(0, 8)}`,
+    avatarColor: '#4F46E5',
   });
-  if (!isSuccess<{ challengeToken: string }>(login.body)) throw new Error('login failed');
-  const verify = await app.fetchJson('/api/v1/auth/verify', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ challengeToken: login.body.data.challengeToken, otp: '123456' }),
-  });
-  if (!isSuccess<{ accessToken: string; user: { id: string } }>(verify.body)) {
-    throw new Error('verify failed');
-  }
-  return { token: verify.body.data.accessToken, userId: verify.body.data.user.id };
+  const pair = app.tokens.issuePair(user.id);
+  return { token: pair.accessToken, userId: user.id };
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -145,10 +146,10 @@ const SEED_EXPENSES: ExpensePayload[] = [
 async function main(): Promise<void> {
   const app = await buildApp();
 
-  const aarya = await signIn(app, '+919876512345');
-  const aarav = await signIn(app, '+919876543210');
-  const meera = await signIn(app, '+918765432109');
-  const kabir = await signIn(app, '+917654321098');
+  const aarya = await signIn(app, 'uid-aarya');
+  const aarav = await signIn(app, 'uid-aarav');
+  const meera = await signIn(app, 'uid-meera');
+  const kabir = await signIn(app, 'uid-kabir');
   const userByKey = { aarya, aarav, meera, kabir };
 
   console.log('\n· bootstrap Goa trip (Aarya owns)');
@@ -280,7 +281,7 @@ async function main(): Promise<void> {
   }
 
   console.log('\n· non-member sees 404 on balances/expenses');
-  const stranger = await signIn(app, '+919999999999');
+  const stranger = await signIn(app, 'uid-stranger');
   const strangerBal = await app.fetchJson(`/api/v1/trips/${tripId}/balances`, {
     headers: authHeaders(stranger.token),
   });

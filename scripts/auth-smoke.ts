@@ -2,23 +2,30 @@
  * End-to-end auth smoke test using the shared in-memory fakes
  * (`scripts/lib/fakes.ts`).
  *
- * Exercises the full state machine without needing Postgres:
- *   login → verify → me → updateProfile → refresh → logout → refresh-after-logout
+ * Exercises the full state machine without needing Postgres or Firebase:
+ *   direct-token-seed → me → updateProfile → refresh → logout → refresh-after-logout
+ *
+ * The /auth/google endpoint requires a live Firebase ID token so it is
+ * covered only at the validation layer (missing idToken → 422).
+ * All downstream session mechanics (protect, me, refresh, logout) are
+ * exercised by seeding users + tokens directly in the fake store.
  *
  * Asserts each step, prints a summary, exits 1 on any failure.
  */
+import { randomUUID } from 'node:crypto';
 import express from 'express';
 import { errorHandler, notFoundHandler, validateRequest } from '../src/middlewares/index.js';
 import { requireAuth } from '../src/middlewares/require-auth.js';
 import { AuthController } from '../src/modules/auth/controller/auth.controller.js';
 import { createAuthRouter } from '../src/modules/auth/routes/auth.routes.js';
 import { AuthService } from '../src/modules/auth/service/auth.service.js';
-import { MockOtpProvider } from '../src/modules/auth/service/otp/mock-otp.provider.js';
 import { TokenService } from '../src/modules/auth/service/token.service.js';
 import { FakeRefreshTokenRepository, FakeStore, FakeUserRepository } from './lib/fakes.js';
 
 interface TestApp {
   fetchJson: (path: string, init?: RequestInit) => Promise<{ status: number; body: unknown }>;
+  store: FakeStore;
+  tokens: TokenService;
   close: () => Promise<void>;
 }
 
@@ -32,7 +39,6 @@ async function buildTestApp(): Promise<TestApp> {
   const service = new AuthService(
     new FakeUserRepository(store),
     new FakeRefreshTokenRepository(store),
-    new MockOtpProvider(),
     tokens,
   );
   const controller = new AuthController(service);
@@ -59,6 +65,8 @@ async function buildTestApp(): Promise<TestApp> {
   const base = `http://127.0.0.1:${String(addr.port)}`;
 
   return {
+    store,
+    tokens,
     fetchJson: async (path, init) => {
       const res = await fetch(`${base}${path}`, init);
       const body = (await res.json().catch(() => null)) as unknown;
@@ -69,6 +77,34 @@ async function buildTestApp(): Promise<TestApp> {
         server.close(() => resolve());
       }),
   };
+}
+
+/** Seed a user directly into the store and issue a real token pair. */
+async function seedUser(
+  store: FakeStore,
+  tokens: TokenService,
+  uid: string,
+): Promise<{ accessToken: string; refreshToken: string; userId: string }> {
+  const repo = new FakeUserRepository(store);
+  const user = await repo.create({
+    firebaseUid: uid,
+    email: `${uid}@smoke.test`,
+    name: '',
+    avatarUrl: null,
+    handle: `u_${randomUUID().replace(/-/g, '').slice(0, 8)}`,
+    avatarColor: '#4F46E5',
+  });
+  const pair = tokens.issuePair(user.id);
+  // Store the refresh token in the fake so refresh/logout work correctly.
+  const refreshRepo = new FakeRefreshTokenRepository(store);
+  await refreshRepo.create({
+    userId: user.id,
+    tokenHash: tokens.hashRefreshToken(pair.refreshToken),
+    expiresAt: pair.refreshTokenExpiresAt,
+    userAgent: null,
+    ipAddress: null,
+  });
+  return { accessToken: pair.accessToken, refreshToken: pair.refreshToken, userId: user.id };
 }
 
 let failures = 0;
@@ -100,59 +136,25 @@ function isError(body: unknown): body is { success: false; error: { code: string
 
 async function main(): Promise<void> {
   const app = await buildTestApp();
-  const phone = '+919876512345';
 
-  console.log('\n· login');
-  const login = await app.fetchJson('/api/v1/auth/login', {
+  console.log('\n· /auth/google input validation');
+  const noToken = await app.fetchJson('/api/v1/auth/google', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ phone }),
+    body: JSON.stringify({}),
   });
-  check('login returns 200', login.status === 200, login);
-  const challengeToken = isSuccess(login.body) ? (login.body.data.challengeToken as string) : '';
-  const devOtp = isSuccess(login.body) ? (login.body.data.devOtp as string | undefined) : undefined;
-  check('challengeToken present', typeof challengeToken === 'string' && challengeToken.length > 0);
-  check('devOtp present in non-prod', devOtp === '123456', devOtp);
+  check('missing idToken -> 422', noToken.status === 422, noToken);
+  check('missing idToken -> error envelope', isError(noToken.body));
 
-  console.log('\n· login validation rejects bad phone');
-  const badLogin = await app.fetchJson('/api/v1/auth/login', {
+  const emptyToken = await app.fetchJson('/api/v1/auth/google', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ phone: 'not-a-phone' }),
+    body: JSON.stringify({ idToken: '' }),
   });
-  check('bad phone -> 422', badLogin.status === 422, badLogin);
-  check('bad phone -> error envelope', isError(badLogin.body));
+  check('empty idToken -> 422', emptyToken.status === 422, emptyToken);
 
-  console.log('\n· verify with wrong OTP');
-  const wrongOtp = await app.fetchJson('/api/v1/auth/verify', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ challengeToken, otp: '000000' }),
-  });
-  check('wrong otp -> 401', wrongOtp.status === 401, wrongOtp);
-  check(
-    'wrong otp -> INVALID_CREDENTIALS',
-    isError(wrongOtp.body) && wrongOtp.body.error.code === 'INVALID_CREDENTIALS',
-    wrongOtp,
-  );
-
-  console.log('\n· verify with correct OTP');
-  const verify = await app.fetchJson('/api/v1/auth/verify', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ challengeToken, otp: '123456' }),
-  });
-  check('verify -> 200', verify.status === 200, verify);
-  const session = isSuccess(verify.body) ? verify.body.data : null;
-  if (session === null) throw new Error('verify failed; aborting');
-
-  const accessToken = session.accessToken as string;
-  const refreshToken = session.refreshToken as string;
-  const user = session.user as { id: string; phone: string; profileComplete: boolean; name: string };
-  check('access token issued', typeof accessToken === 'string' && accessToken.split('.').length === 3);
-  check('refresh token issued', typeof refreshToken === 'string' && refreshToken.split('.').length === 3);
-  check('user has correct phone', user.phone === phone);
-  check('profile starts incomplete', user.profileComplete === false && user.name === '');
+  // Seed a user + tokens directly (skips Firebase — we cannot call verifyIdToken here).
+  const { accessToken, refreshToken, userId } = await seedUser(app.store, app.tokens, 'firebase-uid-alice');
 
   console.log('\n· protected route without auth');
   const noAuth = await app.fetchJson('/api/v1/protected');
@@ -165,7 +167,7 @@ async function main(): Promise<void> {
   check('with access token -> 200', ok.status === 200, ok);
   check(
     'protected echoes user id',
-    isSuccess(ok.body) && ok.body.data['userId'] === user.id,
+    isSuccess(ok.body) && ok.body.data['userId'] === userId,
   );
 
   console.log('\n· me');
@@ -173,7 +175,11 @@ async function main(): Promise<void> {
     headers: { authorization: `Bearer ${accessToken}` },
   });
   check('me -> 200', me.status === 200, me);
-  check('me returns same user id', isSuccess(me.body) && me.body.data['id'] === user.id);
+  check('me returns correct user id', isSuccess(me.body) && me.body.data['id'] === userId);
+  const meUser = isSuccess(me.body)
+    ? (me.body.data as { profileComplete: boolean; name: string })
+    : null;
+  check('profile starts incomplete', meUser !== null && meUser.profileComplete === false);
 
   console.log('\n· profile update');
   const profile = await app.fetchJson('/api/v1/auth/profile', {
@@ -187,6 +193,14 @@ async function main(): Promise<void> {
     isSuccess(profile.body) && profile.body.data['profileComplete'] === true,
   );
 
+  console.log('\n· profile update validation');
+  const badProfile = await app.fetchJson('/api/v1/auth/profile', {
+    method: 'PUT',
+    headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  check('empty body -> 422', badProfile.status === 422, badProfile);
+
   console.log('\n· refresh');
   const refresh = await app.fetchJson('/api/v1/auth/refresh', {
     method: 'POST',
@@ -196,7 +210,7 @@ async function main(): Promise<void> {
   check('refresh -> 200', refresh.status === 200, refresh);
   const rotated = isSuccess(refresh.body) ? refresh.body.data : null;
   if (rotated === null) throw new Error('refresh failed; aborting');
-  const newRefresh = rotated.refreshToken as string;
+  const newRefresh = rotated['refreshToken'] as string;
   check('new refresh token differs', newRefresh !== refreshToken);
 
   console.log('\n· refresh again with old token');
@@ -227,24 +241,9 @@ async function main(): Promise<void> {
   });
   check('refresh post-logout -> 401', afterLogout.status === 401, afterLogout);
 
-  console.log('\n· login again with same phone');
-  const login2 = await app.fetchJson('/api/v1/auth/login', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ phone }),
-  });
-  const challenge2 = isSuccess(login2.body) ? (login2.body.data.challengeToken as string) : '';
-  const verify2 = await app.fetchJson('/api/v1/auth/verify', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ challengeToken: challenge2, otp: '123456' }),
-  });
-  check('verify-2 -> 200', verify2.status === 200, verify2);
-  const u2 = isSuccess(verify2.body)
-    ? (verify2.body.data['user'] as { id: string; profileComplete: boolean })
-    : null;
-  check('returning user has same id', u2 !== null && u2.id === user.id);
-  check('returning user profile still complete', u2 !== null && u2.profileComplete === true);
+  // Seed a second user; confirm they get a different id.
+  const second = await seedUser(app.store, app.tokens, 'firebase-uid-bob');
+  check('second user gets distinct id', second.userId !== userId);
 
   await app.close();
 

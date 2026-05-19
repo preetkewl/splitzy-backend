@@ -10,10 +10,12 @@
  */
 import { randomUUID } from 'node:crypto';
 import type {
+  DeviceToken,
   Expense,
   ExpenseParticipant,
   FriendRequest,
   Friendship,
+  Platform,
   RefreshToken,
   Settlement,
   Trip,
@@ -44,6 +46,8 @@ import type {
   IFriendRepository,
   SearchFilter,
 } from '../../src/modules/friend/repository/friend.repository.js';
+import type { IDeviceTokenRepository } from '../../src/modules/notification/repository/device-token.repository.js';
+import { NotificationService } from '../../src/modules/notification/service/notification.service.js';
 import type { SettlementWithUsers } from '../../src/modules/settlement/mapper/settlement.mapper.js';
 import type {
   CreateSettlementData,
@@ -94,9 +98,9 @@ export class FakeUserRepository implements IUserRepository {
     return u;
   }
   // eslint-disable-next-line @typescript-eslint/require-await
-  async findByPhone(phone: string): Promise<User | null> {
+  async findByFirebaseUid(firebaseUid: string): Promise<User | null> {
     for (const u of this.store.users.values()) {
-      if (u.phone === phone && u.deletedAt === null) return u;
+      if (u.firebaseUid === firebaseUid && u.deletedAt === null) return u;
     }
     return null;
   }
@@ -112,14 +116,14 @@ export class FakeUserRepository implements IUserRepository {
     const now = new Date();
     const user: User = {
       id: this.store.newId(),
-      email: null,
-      phone: input.phone,
+      firebaseUid: input.firebaseUid,
+      email: input.email,
+      phone: null,
       handle: input.handle,
       name: input.name,
       avatarColor: input.avatarColor,
-      avatarUrl: null,
+      avatarUrl: input.avatarUrl ?? null,
       upiId: null,
-      passwordHash: null,
       createdAt: now,
       updatedAt: now,
       deletedAt: null,
@@ -138,6 +142,7 @@ export class FakeUserRepository implements IUserRepository {
       avatarColor: input.avatarColor ?? cur.avatarColor,
       upiId: input.upiId === undefined ? cur.upiId : input.upiId,
       avatarUrl: input.avatarUrl === undefined ? cur.avatarUrl : input.avatarUrl,
+      phone: input.phone === undefined ? cur.phone : input.phone,
       updatedAt: new Date(),
     };
     this.store.users.set(id, next);
@@ -712,7 +717,7 @@ export class FakeFriendRepository implements IFriendRepository {
     for (const u of this.store.users.values()) {
       if (u.id === filter.excludeUserId) continue;
       if (u.deletedAt !== null) continue;
-      const hay = `${u.name.toLowerCase()}|${u.handle.toLowerCase()}|${u.phone}`;
+      const hay = `${u.name.toLowerCase()}|${u.handle.toLowerCase()}|${u.phone ?? ''}`;
       if (hay.includes(q)) results.push(u);
       if (results.length >= filter.limit) break;
     }
@@ -790,4 +795,26 @@ export class FakeSettlementRepository implements ISettlementRepository {
       amountPaise: r.amountPaise,
     }));
   }
+}
+
+// ── Device-token / Notification stubs ────────────────────────────────────────
+
+class FakeDeviceTokenRepository implements IDeviceTokenRepository {
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async upsert(_userId: string, _token: string, _platform: Platform): Promise<DeviceToken> {
+    throw new Error('not implemented in smoke tests');
+  }
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async delete(_token: string): Promise<void> {}
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async findByUserId(_userId: string): Promise<DeviceToken[]> { return []; }
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async findByUserIds(_userIds: string[]): Promise<DeviceToken[]> { return []; }
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async deleteMany(_tokens: string[]): Promise<void> {}
+}
+
+/** Returns a no-op NotificationService suitable for smoke tests (FCM not configured). */
+export function buildNotificationService(): NotificationService {
+  return new NotificationService(new FakeDeviceTokenRepository());
 }

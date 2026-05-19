@@ -17,10 +17,10 @@ import {
   errorHandler,
   notFoundHandler,
 } from '../src/middlewares/index.js';
+import { randomUUID } from 'node:crypto';
 import { AuthController } from '../src/modules/auth/controller/auth.controller.js';
 import { createAuthRouter } from '../src/modules/auth/routes/auth.routes.js';
 import { AuthService } from '../src/modules/auth/service/auth.service.js';
-import { MockOtpProvider } from '../src/modules/auth/service/otp/mock-otp.provider.js';
 import { TokenService } from '../src/modules/auth/service/token.service.js';
 import { TripController } from '../src/modules/trip/controller/trip.controller.js';
 import { createTripRouter } from '../src/modules/trip/routes/trip.routes.js';
@@ -38,6 +38,8 @@ interface JsonResult {
 }
 interface TestApp {
   fetchJson: (path: string, init?: RequestInit) => Promise<JsonResult>;
+  store: FakeStore;
+  tokens: TokenService;
   close: () => Promise<void>;
 }
 
@@ -52,7 +54,7 @@ async function buildApp(): Promise<TestApp> {
   const refreshRepo = new FakeRefreshTokenRepository(store);
   const tripRepo = new FakeTripRepository(store);
 
-  const authService = new AuthService(userRepo, refreshRepo, new MockOtpProvider(), tokens);
+  const authService = new AuthService(userRepo, refreshRepo, tokens);
   const authController = new AuthController(authService);
   const tripService = new TripService(tripRepo);
   const tripController = new TripController(tripService);
@@ -71,6 +73,8 @@ async function buildApp(): Promise<TestApp> {
   const base = `http://127.0.0.1:${String(addr.port)}`;
 
   return {
+    store,
+    tokens,
     fetchJson: async (path, init) => {
       const res = await fetch(`${base}${path}`, init);
       const body = (await res.json().catch(() => null)) as unknown;
@@ -103,23 +107,19 @@ function isError(body: unknown): body is { success: false; error: { code: string
   return typeof body === 'object' && body !== null && (body as { success?: unknown }).success === false;
 }
 
-// Helper: spin up a user via login + verify, return access token + userId.
-async function signIn(app: TestApp, phone: string): Promise<{ token: string; userId: string }> {
-  const login = await app.fetchJson('/api/v1/auth/login', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ phone }),
+/** Create a user in the fake store and return a valid access token. */
+async function signIn(app: TestApp, uid: string): Promise<{ token: string; userId: string }> {
+  const repo = new FakeUserRepository(app.store);
+  const user = await repo.create({
+    firebaseUid: uid,
+    email: null,
+    name: 'Smoke User',
+    avatarUrl: null,
+    handle: `u_${randomUUID().replace(/-/g, '').slice(0, 8)}`,
+    avatarColor: '#4F46E5',
   });
-  if (!isSuccess<{ challengeToken: string }>(login.body)) throw new Error('login failed');
-  const verify = await app.fetchJson('/api/v1/auth/verify', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ challengeToken: login.body.data.challengeToken, otp: '123456' }),
-  });
-  if (!isSuccess<{ accessToken: string; user: { id: string } }>(verify.body)) {
-    throw new Error('verify failed');
-  }
-  return { token: verify.body.data.accessToken, userId: verify.body.data.user.id };
+  const pair = app.tokens.issuePair(user.id);
+  return { token: pair.accessToken, userId: user.id };
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -131,11 +131,11 @@ function authHeaders(token: string): Record<string, string> {
 async function main(): Promise<void> {
   const app = await buildApp();
 
-  // Sign up four users
-  const aarya = await signIn(app, '+919876512345');
-  const aarav = await signIn(app, '+919876543210');
-  const meera = await signIn(app, '+918765432109');
-  const kabir = await signIn(app, '+917654321098');
+  // Seed four users directly (no Firebase needed).
+  const aarya = await signIn(app, 'uid-aarya');
+  const aarav = await signIn(app, 'uid-aarav');
+  const meera = await signIn(app, 'uid-meera');
+  const kabir = await signIn(app, 'uid-kabir');
 
   console.log('\n· auth required everywhere');
   const noAuth = await app.fetchJson('/api/v1/trips');
@@ -226,7 +226,7 @@ async function main(): Promise<void> {
   check('member detail -> 200', detailMember.status === 200);
 
   console.log('\n· detail (non-member -> 404, not 403)');
-  const stranger = await signIn(app, '+919999999999');
+  const stranger = await signIn(app, 'uid-stranger');
   const detailStranger = await app.fetchJson(`/api/v1/trips/${trip.id}`, {
     headers: authHeaders(stranger.token),
   });

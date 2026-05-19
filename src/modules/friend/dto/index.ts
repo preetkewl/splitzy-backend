@@ -35,8 +35,8 @@ export type FriendSearchRelationship =
   | 'request_incoming';
 
 export interface FriendSearchResultDto extends FriendUserPreviewDto {
-  /** Soft hint, sometimes useful for invite-by-phone fallback. */
-  phone: string;
+  /** Soft hint, sometimes useful for invite-by-phone fallback. Null for Google-only users. */
+  phone: string | null;
   relationship: FriendSearchRelationship;
   /**
    * If `relationship` is `request_outgoing` or `request_incoming`, the

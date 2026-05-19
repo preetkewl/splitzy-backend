@@ -12,12 +12,12 @@
  *   - canonical Friendship pair preserved regardless of who sent first
  *   - search now reflects the friendship
  */
+import { randomUUID } from 'node:crypto';
 import express from 'express';
 import { errorHandler, notFoundHandler } from '../src/middlewares/index.js';
 import { AuthController } from '../src/modules/auth/controller/auth.controller.js';
 import { createAuthRouter } from '../src/modules/auth/routes/auth.routes.js';
 import { AuthService } from '../src/modules/auth/service/auth.service.js';
-import { MockOtpProvider } from '../src/modules/auth/service/otp/mock-otp.provider.js';
 import { TokenService } from '../src/modules/auth/service/token.service.js';
 import { FriendController } from '../src/modules/friend/controller/friend.controller.js';
 import { createFriendRouter } from '../src/modules/friend/routes/friend.routes.js';
@@ -27,11 +27,13 @@ import {
   FakeRefreshTokenRepository,
   FakeStore,
   FakeUserRepository,
+  buildNotificationService,
 } from './lib/fakes.js';
 
 interface TestApp {
   fetchJson: (path: string, init?: RequestInit) => Promise<{ status: number; body: unknown }>;
   store: FakeStore;
+  tokens: TokenService;
   close: () => Promise<void>;
 }
 
@@ -46,8 +48,8 @@ async function buildApp(): Promise<TestApp> {
   const refreshRepo = new FakeRefreshTokenRepository(store);
   const friendRepo = new FakeFriendRepository(store);
 
-  const authService = new AuthService(userRepo, refreshRepo, new MockOtpProvider(), tokens);
-  const friendService = new FriendService(friendRepo, userRepo);
+  const authService = new AuthService(userRepo, refreshRepo, tokens);
+  const friendService = new FriendService(friendRepo, userRepo, buildNotificationService());
 
   const app = express();
   app.use(express.json());
@@ -67,6 +69,7 @@ async function buildApp(): Promise<TestApp> {
 
   return {
     store,
+    tokens,
     fetchJson: async (path, init) => {
       const res = await fetch(`${base}${path}`, init);
       const body = (await res.json().catch(() => null)) as unknown;
@@ -96,34 +99,24 @@ function isError(body: unknown): body is { success: false; error: { code: string
   return typeof body === 'object' && body !== null && (body as { success?: unknown }).success === false;
 }
 
+/** Create a user with predictable profile data and return an access token. */
 async function signIn(
   app: TestApp,
-  phone: string,
+  uid: string,
   profile: { name: string; handle?: string },
 ): Promise<{ token: string; userId: string }> {
-  const login = await app.fetchJson('/api/v1/auth/login', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ phone }),
+  const repo = new FakeUserRepository(app.store);
+  const handle = profile.handle ?? profile.name.toLowerCase().replace(/\s+/g, '_');
+  const user = await repo.create({
+    firebaseUid: uid,
+    email: null,
+    name: profile.name,
+    avatarUrl: null,
+    handle: `${handle}_${randomUUID().replace(/-/g, '').slice(0, 4)}`,
+    avatarColor: '#4F46E5',
   });
-  if (!isSuccess<{ challengeToken: string }>(login.body)) throw new Error('login failed');
-  const verify = await app.fetchJson('/api/v1/auth/verify', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ challengeToken: login.body.data.challengeToken, otp: '123456' }),
-  });
-  if (!isSuccess<{ accessToken: string; user: { id: string } }>(verify.body)) {
-    throw new Error('verify failed');
-  }
-  const token = verify.body.data.accessToken;
-  const userId = verify.body.data.user.id;
-  // Set name + handle so /search has predictable data.
-  await app.fetchJson('/api/v1/auth/profile', {
-    method: 'PUT',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ name: profile.name, handle: profile.handle ?? profile.name.toLowerCase() }),
-  });
-  return { token, userId };
+  const pair = app.tokens.issuePair(user.id);
+  return { token: pair.accessToken, userId: user.id };
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -133,10 +126,10 @@ function authHeaders(token: string): Record<string, string> {
 async function main(): Promise<void> {
   const app = await buildApp();
 
-  const aarya = await signIn(app, '+919876512345', { name: 'Aarya Sharma', handle: 'aarya' });
-  const aarav = await signIn(app, '+919876543210', { name: 'Aarav', handle: 'aarav' });
-  const meera = await signIn(app, '+918765432109', { name: 'Meera', handle: 'meera' });
-  const kabir = await signIn(app, '+917654321098', { name: 'Kabir', handle: 'kabir' });
+  const aarya = await signIn(app, 'uid-aarya', { name: 'Aarya Sharma', handle: 'aarya' });
+  const aarav = await signIn(app, 'uid-aarav', { name: 'Aarav', handle: 'aarav' });
+  const meera = await signIn(app, 'uid-meera', { name: 'Meera', handle: 'meera' });
+  const kabir = await signIn(app, 'uid-kabir', { name: 'Kabir', handle: 'kabir' });
 
   console.log('\n· auth required everywhere');
   const noAuth = await app.fetchJson('/api/v1/friends');
