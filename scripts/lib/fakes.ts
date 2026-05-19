@@ -105,6 +105,13 @@ export class FakeUserRepository implements IUserRepository {
     return null;
   }
   // eslint-disable-next-line @typescript-eslint/require-await
+  async findByPhone(phone: string): Promise<User | null> {
+    for (const u of this.store.users.values()) {
+      if (u.phone === phone && u.deletedAt === null) return u;
+    }
+    return null;
+  }
+  // eslint-disable-next-line @typescript-eslint/require-await
   async findByHandle(handle: string): Promise<User | null> {
     for (const u of this.store.users.values()) {
       if (u.handle === handle && u.deletedAt === null) return u;

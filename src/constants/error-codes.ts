@@ -16,6 +16,7 @@ export const ERROR_CODES = {
   INVALID_TOKEN: 'INVALID_TOKEN',
   TOKEN_EXPIRED: 'TOKEN_EXPIRED',
   HANDLE_TAKEN: 'HANDLE_TAKEN',
+  PHONE_TAKEN: 'PHONE_TAKEN',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

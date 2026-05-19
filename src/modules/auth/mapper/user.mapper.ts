@@ -2,8 +2,12 @@ import type { User } from '@prisma/client';
 import { MIN_NAME_LENGTH } from '../constants.js';
 import type { UserDto } from '../dto/index.js';
 
-export function isProfileComplete(user: Pick<User, 'name'>): boolean {
-  return user.name.trim().length >= MIN_NAME_LENGTH;
+export function isProfileComplete(user: Pick<User, 'name' | 'phone'>): boolean {
+  return (
+    user.name.trim().length >= MIN_NAME_LENGTH &&
+    typeof user.phone === 'string' &&
+    user.phone.trim().length > 0
+  );
 }
 
 export function toUserDto(user: User): UserDto {

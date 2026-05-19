@@ -112,6 +112,13 @@ export class AuthService {
       }
     }
 
+    if (input.phone !== undefined && input.phone !== null && input.phone !== '') {
+      const taken = await this.users.findByPhone(input.phone);
+      if (taken !== null && taken.id !== userId) {
+        throw new ApiError(HTTP.CONFLICT, ERROR_CODES.PHONE_TAKEN, 'Phone number is already linked to another account');
+      }
+    }
+
     const update: UpdateProfileInput = {};
     if (input.name !== undefined) update.name = input.name.trim();
     if (input.handle !== undefined) update.handle = input.handle;

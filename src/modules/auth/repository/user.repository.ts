@@ -22,6 +22,7 @@ export interface IUserRepository {
   findById(id: string): Promise<User | null>;
   findByFirebaseUid(firebaseUid: string): Promise<User | null>;
   findByHandle(handle: string): Promise<User | null>;
+  findByPhone(phone: string): Promise<User | null>;
   create(input: CreateUserInput): Promise<User>;
   update(id: string, input: UpdateUserInput): Promise<User>;
 }
@@ -35,6 +36,10 @@ export class UserRepository implements IUserRepository {
 
   findByFirebaseUid(firebaseUid: string): Promise<User | null> {
     return this.prisma.user.findFirst({ where: { firebaseUid, deletedAt: null } });
+  }
+
+  findByPhone(phone: string): Promise<User | null> {
+    return this.prisma.user.findFirst({ where: { phone, deletedAt: null } });
   }
 
   findByHandle(handle: string): Promise<User | null> {
