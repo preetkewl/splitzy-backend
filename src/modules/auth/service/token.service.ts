@@ -3,10 +3,9 @@ import jwt, { type SignOptions } from 'jsonwebtoken';
 import { ApiError } from '../../../core/api-error.js';
 import { ERROR_CODES } from '../../../constants/error-codes.js';
 import { HTTP } from '../../../constants/http.js';
-import { CHALLENGE_TTL_SECONDS, TOKEN_TYPE } from '../constants.js';
+import { TOKEN_TYPE } from '../constants.js';
 import type {
   AccessTokenPayload,
-  ChallengeTokenPayload,
   IssuedTokenPair,
   RefreshTokenPayload,
 } from '../types/index.js';
@@ -17,14 +16,6 @@ export interface TokenServiceOptions {
   refreshExpiresIn: string | number;
 }
 
-/**
- * Owns all JWT signing, verification, and refresh-token hashing.
- *
- * Separating this from AuthService keeps:
- *   - the JWT library a single-import surface (easy to swap)
- *   - secret access scoped to one class
- *   - services + repositories testable without crypto setup
- */
 export class TokenService {
   constructor(private readonly opts: TokenServiceOptions) {}
 
@@ -49,7 +40,7 @@ export class TokenService {
     if (decoded.type !== TOKEN_TYPE.ACCESS) {
       throw ApiError.unauthorized('Wrong token type');
     }
-    return decoded;
+    return decoded as AccessTokenPayload;
   }
 
   // ── Refresh tokens ─────────────────────────────────────────────────────────
@@ -73,42 +64,12 @@ export class TokenService {
     if (decoded.type !== TOKEN_TYPE.REFRESH) {
       throw ApiError.unauthorized('Wrong token type');
     }
-    return decoded;
+    return decoded as RefreshTokenPayload;
   }
 
-  /**
-   * Hash a refresh token before storage. Refresh tokens are JWTs (high
-   * entropy), so a fast hash like SHA-256 is sufficient — bcrypt would
-   * waste cycles on already-unguessable input.
-   */
   hashRefreshToken(token: string): string {
     return createHash('sha256').update(token).digest('hex');
   }
-
-  // ── Challenge tokens (OTP gate) ────────────────────────────────────────────
-
-  signChallengeToken(input: { phone: string; challengeId: string }): { token: string; expiresAt: Date } {
-    const options: SignOptions = { expiresIn: CHALLENGE_TTL_SECONDS };
-    const token = jwt.sign(
-      { ...input, type: TOKEN_TYPE.CHALLENGE } satisfies Omit<
-        ChallengeTokenPayload,
-        'iat' | 'exp' | 'jti'
-      >,
-      this.opts.secret,
-      options,
-    );
-    return { token, expiresAt: this.decodeExpiry(token) };
-  }
-
-  verifyChallengeToken(token: string): ChallengeTokenPayload {
-    const decoded = this.verify(token);
-    if (decoded.type !== TOKEN_TYPE.CHALLENGE) {
-      throw ApiError.unauthorized('Wrong token type');
-    }
-    return decoded;
-  }
-
-  // ── Pair issuance ──────────────────────────────────────────────────────────
 
   issuePair(userId: string): IssuedTokenPair & { accessJti: string; refreshJti: string } {
     const access = this.signAccessToken(userId);
@@ -125,9 +86,7 @@ export class TokenService {
 
   // ── Internal ───────────────────────────────────────────────────────────────
 
-  private verify(
-    token: string,
-  ): AccessTokenPayload | RefreshTokenPayload | ChallengeTokenPayload {
+  private verify(token: string): AccessTokenPayload | RefreshTokenPayload {
     try {
       const decoded = jwt.verify(token, this.opts.secret);
       if (typeof decoded === 'string' || decoded === null) {
@@ -140,20 +99,11 @@ export class TokenService {
       const exp = (decoded as { exp?: unknown }).exp;
       if (
         typeof type !== 'string' ||
+        typeof sub !== 'string' ||
+        typeof jti !== 'string' ||
         typeof iat !== 'number' ||
         typeof exp !== 'number'
       ) {
-        throw new ApiError(HTTP.UNAUTHORIZED, ERROR_CODES.INVALID_TOKEN, 'Malformed token claims');
-      }
-      if (type === TOKEN_TYPE.CHALLENGE) {
-        const phone = (decoded as { phone?: unknown }).phone;
-        const challengeId = (decoded as { challengeId?: unknown }).challengeId;
-        if (typeof phone !== 'string' || typeof challengeId !== 'string') {
-          throw new ApiError(HTTP.UNAUTHORIZED, ERROR_CODES.INVALID_TOKEN, 'Malformed challenge');
-        }
-        return { type, phone, challengeId, jti: typeof jti === 'string' ? jti : '', iat, exp };
-      }
-      if (typeof sub !== 'string' || typeof jti !== 'string') {
         throw new ApiError(HTTP.UNAUTHORIZED, ERROR_CODES.INVALID_TOKEN, 'Malformed token claims');
       }
       if (type === TOKEN_TYPE.ACCESS) return { type, sub, jti, iat, exp };

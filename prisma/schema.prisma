@@ -74,19 +74,21 @@ enum Platform {
 // ──────────────────────────────────────────────────────────────────────────────
 
 model User {
-  id           String  @id @default(uuid()) @db.Uuid
-  email        String? @unique
-  phone        String  @unique
+  id          String  @id @default(uuid()) @db.Uuid
+  /// Firebase UID from Google Sign-In. Nullable for migration compatibility
+  /// with any pre-existing phone-auth rows; all new rows will have this set.
+  firebaseUid String? @unique
+  email       String? @unique
+  /// Optional profile field — not used for authentication.
+  phone       String? @unique
   /// Public username without leading "@". Indexed for friend search.
-  handle       String  @unique
-  name         String
+  handle      String  @unique
+  name        String
   /// Hex deterministic from id at signup. Stored so the avatar stays
   /// stable if the derivation rule changes later.
-  avatarColor  String
-  avatarUrl    String?
-  upiId        String?
-  /// Null for OAuth-only accounts. Bcrypt/argon2 in step 2.
-  passwordHash String?
+  avatarColor String
+  avatarUrl   String?
+  upiId       String?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt

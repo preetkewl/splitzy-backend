@@ -3,11 +3,10 @@ import { authRateLimiter, requireAuth, validateRequest } from '../../../middlewa
 import type { AuthController } from '../controller/auth.controller.js';
 import type { TokenService } from '../service/token.service.js';
 import {
-  loginBodySchema,
+  googleSignInBodySchema,
   logoutBodySchema,
   refreshBodySchema,
   updateProfileBodySchema,
-  verifyBodySchema,
 } from '../validation/index.js';
 
 export interface AuthRouterDeps {
@@ -15,26 +14,15 @@ export interface AuthRouterDeps {
   tokens: TokenService;
 }
 
-/**
- * Auth router. Wires validation, rate-limiting, and (where required)
- * the access-token guard to each endpoint.
- */
 export function createAuthRouter(deps: AuthRouterDeps): Router {
   const router = Router();
   const auth = requireAuth(deps.tokens);
 
   router.post(
-    '/login',
+    '/google',
     authRateLimiter,
-    validateRequest({ body: loginBodySchema }),
-    deps.controller.login,
-  );
-
-  router.post(
-    '/verify',
-    authRateLimiter,
-    validateRequest({ body: verifyBodySchema }),
-    deps.controller.verify,
+    validateRequest({ body: googleSignInBodySchema }),
+    deps.controller.googleSignIn,
   );
 
   router.post(

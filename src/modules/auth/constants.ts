@@ -1,20 +1,8 @@
-/**
- * Auth-module constants. Keep token-shape and validation constants here so
- * service, validation, and tests share a single source of truth.
- */
-
 export const TOKEN_TYPE = {
   ACCESS: 'access',
   REFRESH: 'refresh',
-  CHALLENGE: 'challenge',
 } as const;
 export type TokenType = (typeof TOKEN_TYPE)[keyof typeof TOKEN_TYPE];
-
-/** OTP length the API accepts. Mock provider always returns "123456". */
-export const OTP_LENGTH = 6;
-
-/** Lifetime of the OTP challenge JWT — short by design. */
-export const CHALLENGE_TTL_SECONDS = 5 * 60;
 
 // ── Profile constraints (mirrored from the Flutter profile screen) ───────────
 
@@ -37,5 +25,4 @@ export const UPI_PATTERN = /^[a-zA-Z0-9._-]{2,}@[a-zA-Z]{2,}$/;
 
 export const HANDLE_GENERATION_MAX_ATTEMPTS = 5;
 
-/** Default fallback color for newly created users; replaced by frontend palette later. */
 export const DEFAULT_AVATAR_COLOR = '#1F8A5B';

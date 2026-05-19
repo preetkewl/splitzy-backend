@@ -1,41 +1,22 @@
-/**
- * Wire-format types returned by the auth API. Decoupled from the Prisma
- * row shape so adding/renaming columns doesn't break the client.
- */
-
 export interface UserDto {
   id: string;
-  phone: string;
-  handle: string;
+  firebaseUid: string | null;
+  email: string | null;
   name: string;
+  handle: string;
   avatarColor: string;
   avatarUrl: string | null;
+  phone: string | null;
   upiId: string | null;
-  email: string | null;
-  /** True when the user has filled out the profile screen. */
   profileComplete: boolean;
   createdAt: string;
   updatedAt: string;
 }
 
-// ── Login flow ───────────────────────────────────────────────────────────────
+// ── Google Sign-In flow ──────────────────────────────────────────────────────
 
-export interface LoginInput {
-  phone: string;
-}
-
-export interface LoginResponseDto {
-  challengeToken: string;
-  expiresAt: string;
-  /** Only present in non-production for the mock OTP provider. */
-  devOtp?: string;
-}
-
-// ── Verify flow ──────────────────────────────────────────────────────────────
-
-export interface VerifyInput {
-  challengeToken: string;
-  otp: string;
+export interface GoogleSignInInput {
+  idToken: string;
 }
 
 export interface AuthSessionDto {
@@ -73,4 +54,5 @@ export interface UpdateProfileInput {
   avatarColor?: string;
   upiId?: string | null;
   avatarUrl?: string | null;
+  phone?: string | null;
 }

@@ -1,31 +1,25 @@
 import { randomUUID } from 'node:crypto';
 import type { User } from '@prisma/client';
+import { getFirebaseAuth } from '../../../config/firebase.js';
 import { ApiError } from '../../../core/api-error.js';
 import { ERROR_CODES } from '../../../constants/error-codes.js';
 import { HTTP } from '../../../constants/http.js';
 import { logger } from '../../../utils/logger.js';
-import {
-  DEFAULT_AVATAR_COLOR,
-  HANDLE_GENERATION_MAX_ATTEMPTS,
-} from '../constants.js';
+import { DEFAULT_AVATAR_COLOR, HANDLE_GENERATION_MAX_ATTEMPTS } from '../constants.js';
 import type {
   AuthSessionDto,
-  LoginInput,
-  LoginResponseDto,
+  GoogleSignInInput,
   RefreshInput,
   RefreshResponseDto,
   UpdateProfileInput,
   UserDto,
-  VerifyInput,
 } from '../dto/index.js';
 import { toUserDto } from '../mapper/user.mapper.js';
 import type { IRefreshTokenRepository } from '../repository/refresh-token.repository.js';
 import type { IUserRepository } from '../repository/user.repository.js';
-import type { OtpProvider } from './otp/otp-provider.js';
 import type { TokenService } from './token.service.js';
 
 export interface AuthServiceContext {
-  /** Optional request metadata for refresh-token bookkeeping. */
   userAgent?: string | null;
   ipAddress?: string | null;
 }
@@ -34,68 +28,44 @@ export class AuthService {
   constructor(
     private readonly users: IUserRepository,
     private readonly refreshTokens: IRefreshTokenRepository,
-    private readonly otp: OtpProvider,
     private readonly tokens: TokenService,
   ) {}
 
-  // ── login ─────────────────────────────────────────────────────────────────
+  // ── Google Sign-In ────────────────────────────────────────────────────────
 
-  async login(input: LoginInput): Promise<LoginResponseDto> {
-    const { challengeId, devOtp } = await this.otp.start(input.phone);
-    const { token, expiresAt } = this.tokens.signChallengeToken({
-      phone: input.phone,
-      challengeId,
-    });
-    logger.info(
-      { phone: maskPhone(input.phone), provider: this.otp.name },
-      'otp challenge issued',
-    );
-    const result: LoginResponseDto = {
-      challengeToken: token,
-      expiresAt: expiresAt.toISOString(),
-    };
-    if (devOtp !== undefined) result.devOtp = devOtp;
-    return result;
-  }
-
-  // ── verify ────────────────────────────────────────────────────────────────
-
-  async verify(input: VerifyInput, ctx: AuthServiceContext = {}): Promise<AuthSessionDto> {
-    const challenge = this.tokens.verifyChallengeToken(input.challengeToken);
-    const ok = await this.otp.verify(challenge.challengeId, challenge.phone, input.otp);
-    if (!ok) {
-      throw new ApiError(
-        HTTP.UNAUTHORIZED,
-        ERROR_CODES.INVALID_CREDENTIALS,
-        'Invalid OTP',
-      );
+  async googleSignIn(input: GoogleSignInInput, ctx: AuthServiceContext = {}): Promise<AuthSessionDto> {
+    let decoded: { uid: string; email?: string; name?: string; picture?: string };
+    try {
+      decoded = await getFirebaseAuth().verifyIdToken(input.idToken);
+    } catch {
+      throw new ApiError(HTTP.UNAUTHORIZED, ERROR_CODES.INVALID_TOKEN, 'Invalid or expired Firebase ID token');
     }
-    const user = await this.findOrCreateUser(challenge.phone);
-    const session = await this.issueSession(user, ctx);
-    return session;
+
+    const user = await this.findOrCreateByFirebaseUid({
+      firebaseUid: decoded.uid,
+      email: decoded.email ?? null,
+      name: decoded.name ?? '',
+      avatarUrl: decoded.picture ?? null,
+    });
+
+    logger.info({ userId: user.id, firebaseUid: decoded.uid }, 'google sign-in');
+    return this.issueSession(user, ctx);
   }
 
-  // ── refresh ───────────────────────────────────────────────────────────────
+  // ── Refresh ───────────────────────────────────────────────────────────────
 
   async refresh(input: RefreshInput, ctx: AuthServiceContext = {}): Promise<RefreshResponseDto> {
-    // Defense in depth: verify the JWT signature first, then check the
-    // hash exists in DB and isn't revoked/expired.
     const decoded = this.tokens.verifyRefreshToken(input.refreshToken);
     const tokenHash = this.tokens.hashRefreshToken(input.refreshToken);
     const stored = await this.refreshTokens.findActiveByHash(tokenHash);
     if (stored === null || stored.userId !== decoded.sub) {
-      throw new ApiError(
-        HTTP.UNAUTHORIZED,
-        ERROR_CODES.INVALID_TOKEN,
-        'Refresh token not recognized',
-      );
+      throw new ApiError(HTTP.UNAUTHORIZED, ERROR_CODES.INVALID_TOKEN, 'Refresh token not recognized');
     }
     const user = await this.users.findById(decoded.sub);
     if (user === null) {
       throw new ApiError(HTTP.UNAUTHORIZED, ERROR_CODES.UNAUTHORIZED, 'User no longer exists');
     }
 
-    // Rotate: revoke the old, issue a new pair.
     await this.refreshTokens.revokeById(stored.id);
     const pair = this.tokens.issuePair(user.id);
     await this.refreshTokens.create({
@@ -114,7 +84,7 @@ export class AuthService {
     };
   }
 
-  // ── logout ────────────────────────────────────────────────────────────────
+  // ── Logout ────────────────────────────────────────────────────────────────
 
   async logout(refreshToken: string | undefined): Promise<void> {
     if (refreshToken === undefined || refreshToken.length === 0) return;
@@ -122,7 +92,7 @@ export class AuthService {
     await this.refreshTokens.revokeByHash(tokenHash);
   }
 
-  // ── me ────────────────────────────────────────────────────────────────────
+  // ── Me ────────────────────────────────────────────────────────────────────
 
   async me(userId: string): Promise<UserDto> {
     const user = await this.users.findById(userId);
@@ -132,17 +102,13 @@ export class AuthService {
     return toUserDto(user);
   }
 
-  // ── profile ───────────────────────────────────────────────────────────────
+  // ── Profile ───────────────────────────────────────────────────────────────
 
   async updateProfile(userId: string, input: UpdateProfileInput): Promise<UserDto> {
     if (input.handle !== undefined) {
       const taken = await this.users.findByHandle(input.handle);
       if (taken !== null && taken.id !== userId) {
-        throw new ApiError(
-          HTTP.CONFLICT,
-          ERROR_CODES.HANDLE_TAKEN,
-          'Handle is already taken',
-        );
+        throw new ApiError(HTTP.CONFLICT, ERROR_CODES.HANDLE_TAKEN, 'Handle is already taken');
       }
     }
 
@@ -152,24 +118,33 @@ export class AuthService {
     if (input.avatarColor !== undefined) update.avatarColor = input.avatarColor;
     if (input.upiId !== undefined) update.upiId = input.upiId === '' ? null : input.upiId;
     if (input.avatarUrl !== undefined) update.avatarUrl = input.avatarUrl;
+    if (input.phone !== undefined) update.phone = input.phone;
 
     const updated = await this.users.update(userId, update);
     return toUserDto(updated);
   }
 
-  // ── internal helpers ──────────────────────────────────────────────────────
+  // ── Internal helpers ──────────────────────────────────────────────────────
 
-  private async findOrCreateUser(phone: string): Promise<User> {
-    const existing = await this.users.findByPhone(phone);
+  private async findOrCreateByFirebaseUid(input: {
+    firebaseUid: string;
+    email: string | null;
+    name: string;
+    avatarUrl: string | null;
+  }): Promise<User> {
+    const existing = await this.users.findByFirebaseUid(input.firebaseUid);
     if (existing !== null) return existing;
+
     const handle = await this.generateUniqueHandle();
     const created = await this.users.create({
-      phone,
+      firebaseUid: input.firebaseUid,
+      email: input.email,
+      name: input.name,
+      avatarUrl: input.avatarUrl,
       handle,
-      name: '',
       avatarColor: DEFAULT_AVATAR_COLOR,
     });
-    logger.info({ userId: created.id, phone: maskPhone(phone) }, 'user created');
+    logger.info({ userId: created.id }, 'user created via Google sign-in');
     return created;
   }
 
@@ -199,9 +174,4 @@ export class AuthService {
       refreshTokenExpiresAt: pair.refreshTokenExpiresAt.toISOString(),
     };
   }
-}
-
-function maskPhone(phone: string): string {
-  if (phone.length < 6) return '***';
-  return `${phone.slice(0, 3)}***${phone.slice(-2)}`;
 }

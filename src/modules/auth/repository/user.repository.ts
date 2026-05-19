@@ -1,9 +1,11 @@
 import type { PrismaClient, User } from '@prisma/client';
 
 export interface CreateUserInput {
-  phone: string;
-  handle: string;
+  firebaseUid: string;
+  email: string | null;
   name: string;
+  avatarUrl: string | null;
+  handle: string;
   avatarColor: string;
 }
 
@@ -13,11 +15,12 @@ export interface UpdateUserInput {
   avatarColor?: string;
   upiId?: string | null;
   avatarUrl?: string | null;
+  phone?: string | null;
 }
 
 export interface IUserRepository {
   findById(id: string): Promise<User | null>;
-  findByPhone(phone: string): Promise<User | null>;
+  findByFirebaseUid(firebaseUid: string): Promise<User | null>;
   findByHandle(handle: string): Promise<User | null>;
   create(input: CreateUserInput): Promise<User>;
   update(id: string, input: UpdateUserInput): Promise<User>;
@@ -30,8 +33,8 @@ export class UserRepository implements IUserRepository {
     return this.prisma.user.findFirst({ where: { id, deletedAt: null } });
   }
 
-  findByPhone(phone: string): Promise<User | null> {
-    return this.prisma.user.findFirst({ where: { phone, deletedAt: null } });
+  findByFirebaseUid(firebaseUid: string): Promise<User | null> {
+    return this.prisma.user.findFirst({ where: { firebaseUid, deletedAt: null } });
   }
 
   findByHandle(handle: string): Promise<User | null> {
