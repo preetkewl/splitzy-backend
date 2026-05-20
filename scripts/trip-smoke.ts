@@ -26,7 +26,9 @@ import { TripController } from '../src/modules/trip/controller/trip.controller.j
 import { createTripRouter } from '../src/modules/trip/routes/trip.routes.js';
 import { TripService } from '../src/modules/trip/service/trip.service.js';
 import {
+  FakeExpenseRepository,
   FakeRefreshTokenRepository,
+  FakeSettlementRepository,
   FakeStore,
   FakeTripRepository,
   FakeUserRepository,
@@ -53,10 +55,12 @@ async function buildApp(): Promise<TestApp> {
   const userRepo = new FakeUserRepository(store);
   const refreshRepo = new FakeRefreshTokenRepository(store);
   const tripRepo = new FakeTripRepository(store);
+  const expenseRepo = new FakeExpenseRepository(store);
+  const settlementRepo = new FakeSettlementRepository(store);
 
   const authService = new AuthService(userRepo, refreshRepo, tokens);
   const authController = new AuthController(authService);
-  const tripService = new TripService(tripRepo);
+  const tripService = new TripService(tripRepo, expenseRepo, settlementRepo);
   const tripController = new TripController(tripService);
 
   const app = express();

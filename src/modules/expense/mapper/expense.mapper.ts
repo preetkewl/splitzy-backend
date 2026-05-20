@@ -35,9 +35,9 @@ export function toExpenseParticipant(p: ExpenseParticipantWithUser): ExpensePart
 /** Wires `canDelete` based on the requesting user's relationship to the expense. */
 export function toExpenseDto(
   row: ExpenseWithRelations,
-  ctx: { viewerUserId: string; tripOwnerId: string },
+  ctx: { viewerUserId: string },
 ): ExpenseDto {
-  const canDelete = row.paidById === ctx.viewerUserId || ctx.tripOwnerId === ctx.viewerUserId;
+  const canDelete = row.createdById === ctx.viewerUserId;
   return {
     id: row.id,
     tripId: row.tripId,

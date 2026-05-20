@@ -61,7 +61,7 @@ async function buildApp(): Promise<TestApp> {
   const settlementRepo = new FakeSettlementRepository(store);
 
   const authService = new AuthService(userRepo, refreshRepo, tokens);
-  const tripService = new TripService(tripRepo);
+  const tripService = new TripService(tripRepo, expenseRepo, settlementRepo);
   const expenseService = new ExpenseService(expenseRepo, tripRepo, userRepo, settlementRepo, buildNotificationService());
   const settlementService = new SettlementService(settlementRepo, tripRepo, buildNotificationService());
 

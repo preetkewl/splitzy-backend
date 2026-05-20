@@ -118,10 +118,7 @@ export class ExpenseService {
       });
     }
 
-    return toExpenseDto(created, {
-      viewerUserId: userId,
-      tripOwnerId: trip.createdById,
-    });
+    return toExpenseDto(created, { viewerUserId: userId });
   }
 
   // ── list ──────────────────────────────────────────────────────────────────
@@ -132,15 +129,12 @@ export class ExpenseService {
     pagination: PaginationInput,
   ): Promise<ListExpensesResult> {
     await this.access.assertMember(tripId, userId);
-    const trip = await this.trips.findById(tripId);
-    if (trip === null) throw ApiError.notFound('Trip not found');
-
     const params = paginate(pagination);
     const { rows, total } = await this.expenses.listByTrip(tripId, params);
 
     return {
       items: rows.map((row) =>
-        toExpenseDto(row, { viewerUserId: userId, tripOwnerId: trip.createdById }),
+        toExpenseDto(row, { viewerUserId: userId }),
       ),
       page: params.page,
       pageSize: params.pageSize,
@@ -158,13 +152,9 @@ export class ExpenseService {
     // exists but for a trip the caller can't see (404, not 403).
     await this.access.assertMember(expense.tripId, userId);
 
-    // Permission: payer or trip owner.
-    const trip = await this.trips.findById(expense.tripId);
-    if (trip === null) throw ApiError.notFound('Trip not found');
-    const isPayer = expense.paidById === userId;
-    const isOwner = trip.createdById === userId;
-    if (!isPayer && !isOwner) {
-      throw ApiError.forbidden('Only the payer or the trip owner can delete an expense');
+    // Permission: only the expense creator can delete.
+    if (expense.createdById !== userId) {
+      throw ApiError.forbidden('Only the expense creator can delete an expense');
     }
 
     await this.expenses.softDelete(expenseId);

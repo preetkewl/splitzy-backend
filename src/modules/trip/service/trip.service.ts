@@ -2,6 +2,8 @@ import { ApiError } from '../../../core/api-error.js';
 import { paginate, type PaginationInput } from '../../../database/helpers.js';
 import { TRIP_COVER_COLORS } from '../../../database/constants.js';
 import { logger } from '../../../utils/logger.js';
+import type { IExpenseRepository } from '../../expense/repository/expense.repository.js';
+import type { ISettlementRepository } from '../../settlement/repository/settlement.repository.js';
 import type {
   AddMembersInput,
   CreateTripInput,
@@ -24,7 +26,11 @@ export interface ListTripsResult {
 export class TripService {
   private readonly access: TripAccess;
 
-  constructor(private readonly trips: ITripRepository) {
+  constructor(
+    private readonly trips: ITripRepository,
+    private readonly expenseRepo: IExpenseRepository,
+    private readonly settlementRepo: ISettlementRepository,
+  ) {
     this.access = new TripAccess(trips);
   }
 
@@ -121,10 +127,39 @@ export class TripService {
     if (target.role === 'OWNER') {
       throw ApiError.forbidden('The trip owner cannot be removed');
     }
+    const netPaise = await this.getMemberNetBalance(tripId, targetUserId);
+    if (netPaise !== 0) {
+      throw ApiError.badRequest('User has pending balances. Please settle first.');
+    }
     await this.trips.removeMember(tripId, targetUserId);
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────
+
+  /**
+   * Computes the net balance for a single member in a trip.
+   * net = totalPaid − totalShare + settlementsOut − settlementsIn.
+   * Returns 0 when the member has no activity.
+   */
+  private async getMemberNetBalance(tripId: string, userId: string): Promise<number> {
+    const [expenseRows, settlementRows] = await Promise.all([
+      this.expenseRepo.findForBalances(tripId),
+      this.settlementRepo.findCompletedForBalances(tripId),
+    ]);
+    let net = 0;
+    for (const e of expenseRows) {
+      if (e.payerId === userId) net += e.amountPaise;
+      for (const p of e.participants) {
+        if (p.userId === userId) net -= p.sharePaise;
+      }
+    }
+    for (const s of settlementRows) {
+      if (s.fromUserId === userId) net += s.amountPaise;
+      if (s.toUserId === userId) net -= s.amountPaise;
+    }
+    return net;
+  }
+
 
   /**
    * Stable rotation through the warm palette. Picks based on Date.now()
