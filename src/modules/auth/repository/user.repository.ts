@@ -25,6 +25,7 @@ export interface IUserRepository {
   findByPhone(phone: string): Promise<User | null>;
   create(input: CreateUserInput): Promise<User>;
   update(id: string, input: UpdateUserInput): Promise<User>;
+  softDelete(id: string): Promise<User>;
 }
 
 export class UserRepository implements IUserRepository {
@@ -52,5 +53,24 @@ export class UserRepository implements IUserRepository {
 
   update(id: string, input: UpdateUserInput): Promise<User> {
     return this.prisma.user.update({ where: { id }, data: input });
+  }
+
+  softDelete(id: string): Promise<User> {
+    // Derive a unique anonymous handle from the user's own UUID so the
+    // NOT NULL + UNIQUE constraint on handle is never violated.
+    const anonHandle = `deleted_${id.replace(/-/g, '').slice(0, 16)}`;
+    return this.prisma.user.update({
+      where: { id },
+      data: {
+        name: 'Deleted User',
+        email: null,
+        phone: null,
+        avatarUrl: null,
+        upiId: null,
+        firebaseUid: null,
+        handle: anonHandle,
+        deletedAt: new Date(),
+      },
+    });
   }
 }

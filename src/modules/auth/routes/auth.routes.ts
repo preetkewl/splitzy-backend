@@ -47,5 +47,9 @@ export function createAuthRouter(deps: AuthRouterDeps): Router {
     deps.controller.updateProfile,
   );
 
+  // DELETE /api/v1/auth/me — anonymize and soft-delete the authenticated user.
+  // Financial records (expenses, settlements, trip memberships) are preserved.
+  router.delete('/me', auth, deps.controller.deleteAccount);
+
   return router;
 }

@@ -49,6 +49,12 @@ export class AuthController {
     return ApiResponse.ok(res, user);
   });
 
+  deleteAccount = asyncHandler(async (req: Request, res: Response) => {
+    const userId = this.requireUserId(req);
+    await this.auth.deleteAccount(userId);
+    return ApiResponse.noContent(res);
+  });
+
   private requireUserId(req: Request): string {
     if (req.user === undefined) {
       throw ApiError.unauthorized('Auth middleware did not run');

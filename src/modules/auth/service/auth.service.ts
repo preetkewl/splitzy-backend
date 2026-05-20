@@ -131,6 +131,25 @@ export class AuthService {
     return toUserDto(updated);
   }
 
+  // ── Delete account ────────────────────────────────────────────────────────
+
+  async deleteAccount(userId: string): Promise<void> {
+    const user = await this.users.findById(userId);
+    if (user === null) {
+      throw new ApiError(HTTP.NOT_FOUND, ERROR_CODES.NOT_FOUND, 'User not found');
+    }
+
+    // Revoke all refresh tokens so no new access tokens can be issued.
+    await this.refreshTokens.revokeAllForUser(userId);
+
+    // Anonymize PII in-place. Financial records (expenses, settlements,
+    // trip memberships) are preserved — they reference this user's id,
+    // which remains valid.
+    await this.users.softDelete(userId);
+
+    logger.info({ userId }, 'user account deleted and anonymized');
+  }
+
   // ── Internal helpers ──────────────────────────────────────────────────────
 
   private async findOrCreateByFirebaseUid(input: {

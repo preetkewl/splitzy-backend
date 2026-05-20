@@ -155,6 +155,27 @@ export class FakeUserRepository implements IUserRepository {
     this.store.users.set(id, next);
     return next;
   }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async softDelete(id: string): Promise<User> {
+    const cur = this.store.users.get(id);
+    if (cur === undefined) throw new Error('user not found');
+    const anonHandle = `deleted_${id.replace(/-/g, '').slice(0, 16)}`;
+    const next: User = {
+      ...cur,
+      name: 'Deleted User',
+      email: null,
+      phone: null,
+      avatarUrl: null,
+      upiId: null,
+      firebaseUid: null,
+      handle: anonHandle,
+      deletedAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.store.users.set(id, next);
+    return next;
+  }
 }
 
 // ── RefreshToken repo ────────────────────────────────────────────────────────
