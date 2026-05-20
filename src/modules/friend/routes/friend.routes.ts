@@ -7,6 +7,7 @@ import {
   requestIdParamSchema,
   searchQuerySchema,
   sendRequestBodySchema,
+  syncContactsBodySchema,
 } from '../validation/index.js';
 
 export interface FriendRouterDeps {
@@ -45,6 +46,12 @@ export function createFriendRouter(deps: FriendRouterDeps): Router {
     '/request/:requestId/reject',
     validateRequest({ params: requestIdParamSchema }),
     deps.controller.rejectRequest,
+  );
+
+  router.post(
+    '/contacts/sync',
+    validateRequest({ body: syncContactsBodySchema }),
+    deps.controller.syncContacts,
   );
 
   return router;

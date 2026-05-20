@@ -8,6 +8,7 @@ import type {
   RequestIdParam,
   SearchQuery,
   SendRequestBody,
+  SyncContactsBody,
 } from '../validation/index.js';
 
 type WithBody<TBody> = Request<Record<string, string>, unknown, TBody>;
@@ -65,6 +66,12 @@ export class FriendController {
   listRequests = asyncHandler(async (req: Request, res: Response) => {
     const userId = this.requireUserId(req);
     const result = await this.friends.listRequests(userId);
+    return ApiResponse.ok(res, result);
+  });
+
+  syncContacts = asyncHandler(async (req: WithBody<SyncContactsBody>, res: Response) => {
+    const userId = this.requireUserId(req);
+    const result = await this.friends.syncContacts(userId, req.body.phones);
     return ApiResponse.ok(res, result);
   });
 

@@ -76,6 +76,9 @@ export interface IFriendRepository {
 
   // Search
   searchUsers(filter: SearchFilter): Promise<User[]>;
+
+  // Contacts
+  findUsersByPhoneSuffixes(suffixes: string[], excludeUserId: string): Promise<User[]>;
 }
 
 const friendInclude = {
@@ -274,6 +277,27 @@ export class FriendRepository implements IFriendRepository {
       },
       take: filter.limit,
       orderBy: [{ handle: 'asc' }, { name: 'asc' }],
+    });
+  }
+
+  /**
+   * Match registered users by the trailing digits of their stored phone.
+   * Each suffix is the last 10 digits of a normalised contact number, so
+   * "+91 98765 43210" → "9876543210" matches a stored "9876543210" or
+   * "+919876543210".  Capped at 200 results; the caller already deduped
+   * and capped the input at 500 suffixes.
+   */
+  findUsersByPhoneSuffixes(suffixes: string[], excludeUserId: string): Promise<User[]> {
+    if (suffixes.length === 0) return Promise.resolve([]);
+    return this.prisma.user.findMany({
+      where: {
+        ...notDeleted,
+        id: { not: excludeUserId },
+        phone: { not: null },
+        OR: suffixes.map((s) => ({ phone: { endsWith: s } })),
+      },
+      take: 200,
+      orderBy: { name: 'asc' },
     });
   }
 }

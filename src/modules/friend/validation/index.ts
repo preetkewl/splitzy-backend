@@ -37,7 +37,15 @@ export const sendRequestBodySchema = z.object({
   message: z.string().max(280).nullable().optional(),
 });
 
+export const syncContactsBodySchema = z.object({
+  phones: z
+    .array(z.string().max(30))
+    .min(1)
+    .max(1000),
+});
+
 export type RequestIdParam = z.infer<typeof requestIdParamSchema>;
 export type SearchQuery = z.infer<typeof searchQuerySchema>;
 export type ListFriendsQuery = z.infer<typeof listFriendsQuerySchema>;
 export type SendRequestBody = z.infer<typeof sendRequestBodySchema>;
+export type SyncContactsBody = z.infer<typeof syncContactsBodySchema>;

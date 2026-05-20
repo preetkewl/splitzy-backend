@@ -8,6 +8,8 @@ import type { IUserRepository } from '../../auth/repository/user.repository.js';
 import type { NotificationService } from '../../notification/service/notification.service.js';
 import { SEARCH_DEFAULT_LIMIT } from '../constants.js';
 import type {
+  ContactMatchDto,
+  ContactSyncResultDto,
   FriendDto,
   FriendRequestDto,
   FriendRequestListDto,
@@ -236,6 +238,63 @@ export class FriendService {
     const updated = await this.friends.rejectRequest(requestId);
     logger.info({ requestId, by: userId }, 'friend request rejected');
     return toFriendRequestDto(updated, userId);
+  }
+
+  // ── contacts sync ─────────────────────────────────────────────────────────
+
+  /**
+   * Given raw phone numbers from the device, return matched registered users
+   * annotated with relationship state so the client renders the right CTA
+   * without extra round-trips.  Normalises to the last 10 digits before
+   * matching so "+91-98765-43210" and "9876543210" both resolve correctly.
+   */
+  async syncContacts(userId: string, phones: string[]): Promise<ContactSyncResultDto> {
+    const suffixes = [
+      ...new Set(
+        phones
+          .map((p) => p.replace(/\D/g, '').slice(-10))
+          .filter((p) => p.length >= 7),
+      ),
+    ].slice(0, 500);
+    if (suffixes.length === 0) return { matches: [] };
+
+    const users = await this.friends.findUsersByPhoneSuffixes(suffixes, userId);
+    if (users.length === 0) return { matches: [] };
+
+    const matches = await Promise.all(
+      users.map((u) => this.decorateContactResult(userId, u)),
+    );
+    return { matches };
+  }
+
+  private async decorateContactResult(
+    viewerUserId: string,
+    other: User,
+  ): Promise<ContactMatchDto> {
+    const friendship = await this.friends.findFriendship(viewerUserId, other.id);
+    if (friendship !== null) {
+      return {
+        ...toFriendUserPreview(other),
+        phone: other.phone!,
+        relationship: 'friend',
+        requestId: null,
+      };
+    }
+    const request = await this.friends.findActiveRequestBetween(viewerUserId, other.id);
+    if (request !== null) {
+      return {
+        ...toFriendUserPreview(other),
+        phone: other.phone!,
+        relationship: request.fromUserId === viewerUserId ? 'request_outgoing' : 'request_incoming',
+        requestId: request.id,
+      };
+    }
+    return {
+      ...toFriendUserPreview(other),
+      phone: other.phone!,
+      relationship: 'none',
+      requestId: null,
+    };
   }
 
   // ── list requests ─────────────────────────────────────────────────────────
