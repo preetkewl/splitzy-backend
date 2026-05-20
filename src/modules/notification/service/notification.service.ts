@@ -16,6 +16,8 @@ export interface NotificationPayload {
   data?: {
     tripId?: string;
     userId?: string;
+    senderId?: string;
+    senderName?: string;
     requestId?: string;
     expenseId?: string;
     settlementId?: string;

@@ -180,7 +180,7 @@ export class FriendService {
       title: 'New friend request',
       body: `${result.fromUser.name} sent you a friend request`,
       type: 'FRIEND_REQUEST',
-      data: { userId: fromUserId, requestId: result.id },
+      data: { senderId: fromUserId, senderName: result.fromUser.name, requestId: result.id },
     });
 
     return toFriendRequestDto(result, fromUserId);
