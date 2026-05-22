@@ -1,14 +1,19 @@
-import { randomUUID } from 'node:crypto';
 import type { User } from '@prisma/client';
 import { getFirebaseAuth } from '../../../config/firebase.js';
 import { ApiError } from '../../../core/api-error.js';
 import { ERROR_CODES } from '../../../constants/error-codes.js';
 import { HTTP } from '../../../constants/http.js';
 import { logger } from '../../../utils/logger.js';
-import { DEFAULT_AVATAR_COLOR, HANDLE_GENERATION_MAX_ATTEMPTS } from '../constants.js';
+import {
+  DEFAULT_AVATAR_COLOR,
+  HANDLE_MAX_LENGTH,
+  HANDLE_MIN_LENGTH,
+  HANDLE_PATTERN,
+} from '../constants.js';
 import type {
   AuthSessionDto,
   GoogleSignInInput,
+  HandleCheckDto,
   RefreshInput,
   RefreshResponseDto,
   UpdateProfileInput,
@@ -161,7 +166,7 @@ export class AuthService {
     const existing = await this.users.findByFirebaseUid(input.firebaseUid);
     if (existing !== null) return existing;
 
-    const handle = await this.generateUniqueHandle();
+    const handle = await this.generateUniqueHandle(input.name);
     const created = await this.users.create({
       firebaseUid: input.firebaseUid,
       email: input.email,
@@ -174,12 +179,90 @@ export class AuthService {
     return created;
   }
 
-  private async generateUniqueHandle(): Promise<string> {
-    for (let i = 0; i < HANDLE_GENERATION_MAX_ATTEMPTS; i += 1) {
-      const candidate = `user_${randomUUID().replace(/-/g, '').slice(0, 8)}`;
-      const taken = await this.users.findByHandle(candidate);
-      if (taken === null) return candidate;
+  // ── Handle availability check ─────────────────────────────────────────────
+
+  async checkHandle(userId: string, handle: string): Promise<HandleCheckDto> {
+    const taken = await this.users.findByHandle(handle);
+    if (taken === null || taken.id === userId) {
+      return { available: true, suggestions: [] };
     }
+
+    const suggestions: string[] = [];
+    const shortYear = new Date().getFullYear() % 100;
+    const fullYear = new Date().getFullYear();
+
+    const candidates = [
+      `${handle}_${shortYear}`,
+      `${handle}_${fullYear}`,
+      `${handle}_1`,
+      `${handle}_2`,
+      `${handle}_3`,
+    ];
+
+    for (const candidate of candidates) {
+      if (
+        candidate.length >= HANDLE_MIN_LENGTH &&
+        candidate.length <= HANDLE_MAX_LENGTH &&
+        HANDLE_PATTERN.test(candidate) &&
+        (await this.users.findByHandle(candidate)) === null
+      ) {
+        suggestions.push(candidate);
+        if (suggestions.length >= 3) break;
+      }
+    }
+
+    for (let i = 4; suggestions.length < 3 && i <= 100; i++) {
+      const candidate = `${handle}_${i}`;
+      if (candidate.length > HANDLE_MAX_LENGTH || !HANDLE_PATTERN.test(candidate)) break;
+      if ((await this.users.findByHandle(candidate)) === null) suggestions.push(candidate);
+    }
+
+    return { available: false, suggestions };
+  }
+
+  // ── Internal helpers ──────────────────────────────────────────────────────
+
+  private nameParts(name: string): string[] {
+    return name
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .replace(/[^a-z0-9\s]/g, '')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+  }
+
+  private sanitizeHandle(name: string): string {
+    const parts = this.nameParts(name);
+    if (parts.length === 0) return 'user';
+    const firstName = parts[0]!;
+    // Use first name alone when it's distinctive (≥ 6 chars);
+    // shorter first names get joined with the rest for uniqueness.
+    const base = firstName.length >= 6 ? firstName : parts.join('_');
+    return base.slice(0, HANDLE_MAX_LENGTH);
+  }
+
+  private async generateUniqueHandle(name: string): Promise<string> {
+    const sanitized = this.sanitizeHandle(name);
+    const base = sanitized.length >= HANDLE_MIN_LENGTH ? sanitized : 'user';
+
+    if ((await this.users.findByHandle(base)) === null) return base;
+
+    // If base is just the first name (long name), also try firstName_lastName
+    const parts = this.nameParts(name);
+    if (parts.length > 1 && parts[0]!.length >= 6) {
+      const withLast = `${parts[0]!}_${parts[parts.length - 1]!}`.slice(0, HANDLE_MAX_LENGTH);
+      if (withLast !== base && withLast.length >= HANDLE_MIN_LENGTH) {
+        if ((await this.users.findByHandle(withLast)) === null) return withLast;
+      }
+    }
+
+    for (let i = 1; i <= 50; i++) {
+      const candidate = `${base}_${i}`.slice(0, HANDLE_MAX_LENGTH);
+      if ((await this.users.findByHandle(candidate)) === null) return candidate;
+    }
+
     throw ApiError.internal('Could not allocate a unique handle');
   }
 

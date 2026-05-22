@@ -6,6 +6,7 @@ import type { LogoutInput, RefreshInput, UpdateProfileInput } from '../dto/index
 import type { AuthService, AuthServiceContext } from '../service/auth.service.js';
 import type {
   GoogleSignInBody,
+  HandleCheckQuery,
   LogoutBody,
   RefreshBody,
   UpdateProfileBody,
@@ -40,6 +41,13 @@ export class AuthController {
     const userId = this.requireUserId(req);
     const user = await this.auth.me(userId);
     return ApiResponse.ok(res, user);
+  });
+
+  checkHandle = asyncHandler(async (req: Request, res: Response) => {
+    const userId = this.requireUserId(req);
+    const { handle } = req.query as HandleCheckQuery;
+    const result = await this.auth.checkHandle(userId, handle);
+    return ApiResponse.ok(res, result);
   });
 
   updateProfile = asyncHandler(async (req: TypedRequest<UpdateProfileBody>, res: Response) => {

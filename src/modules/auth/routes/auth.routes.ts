@@ -4,6 +4,7 @@ import type { AuthController } from '../controller/auth.controller.js';
 import type { TokenService } from '../service/token.service.js';
 import {
   googleSignInBodySchema,
+  handleCheckQuerySchema,
   logoutBodySchema,
   refreshBodySchema,
   updateProfileBodySchema,
@@ -39,6 +40,13 @@ export function createAuthRouter(deps: AuthRouterDeps): Router {
   );
 
   router.get('/me', auth, deps.controller.me);
+
+  router.get(
+    '/handle/check',
+    auth,
+    validateRequest({ query: handleCheckQuerySchema }),
+    deps.controller.checkHandle,
+  );
 
   router.put(
     '/profile',

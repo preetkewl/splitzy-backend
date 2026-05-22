@@ -34,6 +34,10 @@ export const upiSchema = z
 
 export const avatarUrlSchema = z.string().url().max(2048);
 
+export const handleCheckQuerySchema = z.object({
+  handle: handleSchema,
+});
+
 // ── Endpoint schemas ─────────────────────────────────────────────────────────
 
 export const googleSignInBodySchema = z.object({
@@ -65,3 +69,4 @@ export type GoogleSignInBody = z.infer<typeof googleSignInBodySchema>;
 export type RefreshBody = z.infer<typeof refreshBodySchema>;
 export type LogoutBody = z.infer<typeof logoutBodySchema>;
 export type UpdateProfileBody = z.infer<typeof updateProfileBodySchema>;
+export type HandleCheckQuery = z.infer<typeof handleCheckQuerySchema>;
