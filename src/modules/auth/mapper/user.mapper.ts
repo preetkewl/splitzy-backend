@@ -22,6 +22,7 @@ export function toUserDto(user: User): UserDto {
     phone: user.phone,
     upiId: user.upiId,
     profileComplete: isProfileComplete(user),
+    isPremium: user.isPremium,
     createdAt: user.createdAt.toISOString(),
     updatedAt: user.updatedAt.toISOString(),
   };

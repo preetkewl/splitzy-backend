@@ -9,6 +9,7 @@ export interface UserDto {
   phone: string | null;
   upiId: string | null;
   profileComplete: boolean;
+  isPremium: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -47,6 +48,11 @@ export interface LogoutInput {
 }
 
 // ── Profile ──────────────────────────────────────────────────────────────────
+
+export interface HandleCheckDto {
+  available: boolean;
+  suggestions: string[];
+}
 
 export interface UpdateProfileInput {
   name?: string;

@@ -90,6 +90,15 @@ model User {
   avatarUrl   String?
   upiId       String?
 
+  // ── Subscription (Google Play) ───────────────────────────────────────────
+  isPremium              Boolean   @default(false)
+  /// Raw purchase token from Google Play. Stored for server-side verification.
+  subscriptionToken      String?
+  /// Product ID purchased (e.g. splitzy_weekly, splitzy_monthly).
+  subscriptionProductId  String?
+  /// When the current subscription period expires. Null until first purchase.
+  subscriptionExpiresAt  DateTime?
+
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?

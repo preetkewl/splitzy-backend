@@ -5,6 +5,7 @@ import { createFriendModule } from '../modules/friend/index.js';
 import { healthRouter } from '../modules/health/routes/health.routes.js';
 import { createNotificationModule } from '../modules/notification/index.js';
 import { createSettlementModule } from '../modules/settlement/index.js';
+import { createSubscriptionModule } from '../modules/subscription/index.js';
 import { createTripModule } from '../modules/trip/index.js';
 
 /**
@@ -31,6 +32,7 @@ export function createApiRouter(): Router {
     notifications,
   });
   const friends = createFriendModule({ tokens: auth.tokens, notifications });
+  const subscription = createSubscriptionModule({ tokens: auth.tokens });
 
   router.use('/health', healthRouter);
   router.use('/auth', auth.router);
@@ -44,6 +46,7 @@ export function createApiRouter(): Router {
   router.use('/settlements', settlements.rootRouter);
   router.use('/friends', friends.router);
   router.use('/notifications', notificationModule.router);
+  router.use('/subscriptions', subscription.router);
 
   return router;
 }
