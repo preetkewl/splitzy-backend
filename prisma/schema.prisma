@@ -39,10 +39,45 @@ enum ExpenseCategory {
   MISC
 }
 
-/// Reserved enum. Only EQUAL is implemented for MVP. The column exists so
-/// future split modes (EXACT, PERCENT, SHARES) ship without a migration.
+/// How an expense's total amount is divided among its participants.
+///
+/// The split type is an INPUT STRATEGY only. It drives which calculator the
+/// service layer invokes to produce per-participant sharePaise values before
+/// writing to the database. Once written, the balance engine is completely
+/// agnostic to split type — it reads only ExpenseParticipant.sharePaise.
+///
+/// Adding a new value here requires:
+///   1. A dedicated migration file containing ONLY the ALTER TYPE … ADD VALUE
+///      statement (enum DDL must never share a file with table DDL).
+///   2. A new SplitCalculator implementation in the service layer.
+///   3. Updated Zod validation to accept the new type's input shape.
+///
+/// EQUAL   — Every participant owes floor(amountPaise / n). The payer absorbs
+///           the floor-division remainder so SUM(sharePaise) = amountPaise
+///           exactly. No metadata columns are populated on
+///           ExpenseParticipant; basisPoints / shareUnits / exactAmountPaise
+///           are all NULL for these rows.
+///
+/// EXACT   — Each participant's share is specified by the client in paise.
+///           The service validates SUM(exactAmountPaise) = amountPaise before
+///           writing. sharePaise equals exactAmountPaise for every row;
+///           no rounding is involved.
+///
+/// PERCENT — Each participant's share is expressed as a percentage in basis
+///           points (1 bp = 0.01%). The service validates
+///           SUM(basisPoints) = 10 000 and applies the Largest Remainder
+///           Method to distribute any paise remainder without losing or
+///           gaining a single paise.
+///
+/// SHARES  — Each participant is assigned a positive integer unit count.
+///           sharePaise = floor(shareUnits / totalShareUnits * amountPaise)
+///           with the Largest Remainder Method for the remainder. Useful for
+///           "I ate twice as much" style splits.
 enum ExpenseSplitType {
   EQUAL
+  EXACT
+  PERCENT
+  SHARES
 }
 
 enum FriendRequestStatus {
@@ -202,14 +237,42 @@ model Expense {
   id          String           @id @default(uuid()) @db.Uuid
   tripId      String           @db.Uuid
   title       String
-  /// Total amount in paise. Always positive.
+  /// ── CANONICAL ACCOUNTING FIELD ────────────────────────────────────────────
+  /// Total amount in paise. Always a positive integer. Never a Float or
+  /// Decimal. The Flutter client sends and receives integers; SUM aggregates
+  /// must round-trip exactly. This is the amount against which
+  /// SUM(ExpenseParticipant.sharePaise) must equal for every expense.
   amountPaise Int
   category    ExpenseCategory  @default(MISC)
+  /// The strategy used to compute participant shares at creation time.
+  /// After the expense is written this field is informational only —
+  /// the balance engine never branches on it. See the ExpenseSplitType
+  /// enum documentation for the contract each value implies.
   splitType   ExpenseSplitType @default(EQUAL)
   paidById    String           @db.Uuid
   createdById String           @db.Uuid
   /// User-supplied date for the expense (the receipt date), distinct from createdAt.
   spentAt     DateTime
+
+  /// ── AUDIT METADATA ────────────────────────────────────────────────────────
+  /// Immutable snapshot of the raw split intent as supplied by the client
+  /// at creation time. NULL for historical EQUAL expenses (their split is
+  /// fully reconstructible from amountPaise and participant count).
+  ///
+  /// This field is NEVER read by the balance engine or any accounting code.
+  /// It exists solely to allow the UI and support tooling to display or
+  /// verify the original user intent without reverse-engineering it from
+  /// the computed sharePaise values.
+  ///
+  /// Shape by split type:
+  ///   EQUAL   → null
+  ///   EXACT   → { "participants": { "<userId>": <exactPaise: number> } }
+  ///   PERCENT → { "participants": { "<userId>": <basisPoints: number> } }
+  ///   SHARES  → { "participants": { "<userId>": <shareUnits: number> } }
+  ///
+  /// Written once at expense creation; never updated thereafter. If the
+  /// expense is soft-deleted, splitMeta is retained for audit purposes.
+  splitMeta Json?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -226,14 +289,73 @@ model Expense {
   @@map("expenses")
 }
 
-/// One row per (expense, participant) — the share each member owes for a
-/// given expense. For EQUAL splits, share = floor(amount/n) for everyone
-/// except the payer who absorbs the remainder. Sum(sharePaise) == amountPaise.
+/// One row per (expense, participant). Records both the canonical accounting
+/// value (sharePaise) and optional split-strategy metadata for display/audit.
+///
+/// ── ACCOUNTING INVARIANT ──────────────────────────────────────────────────
+/// SUM(sharePaise) across all rows for a given expenseId MUST equal
+/// Expense.amountPaise. This invariant is enforced by the service layer at
+/// write time and asserted by the balance engine at read time. No paise may
+/// be created or destroyed across the life of an expense.
+///
+/// ── FIELD RESPONSIBILITIES ───────────────────────────────────────────────
+///
+/// sharePaise (CANONICAL, mandatory)
+///   The final, computed integer amount this participant owes for this
+///   expense, in paise. This is the ONLY field the balance engine reads.
+///   It is set at creation and never modified (expenses are immutable).
+///   Correct for every split type — the split type only affects HOW this
+///   value was computed before being written.
+///
+/// basisPoints (AUDIT, nullable — PERCENT splits only)
+///   The percentage share assigned to this participant, expressed in basis
+///   points (1 bp = 0.01%). Range: 1–10 000. NULL for all other split types.
+///   DB constraint: expense_participants_single_meta_chk ensures at most one
+///   metadata column is non-NULL per row.
+///   DB constraint: expense_participants_meta_range_chk enforces the range.
+///
+/// shareUnits (AUDIT, nullable — SHARES splits only)
+///   The raw ratio unit for this participant (e.g., if split is 3:5:7, this
+///   holds 3, 5, or 7). Range: 1–1 000 000. NULL for all other split types.
+///
+/// exactAmountPaise (AUDIT, nullable — EXACT splits only)
+///   The client-specified exact amount in paise. Range: ≥ 0. For EXACT
+///   splits, sharePaise equals this value (no rounding). NULL for all other
+///   split types.
+///
+/// ── HISTORICAL ROWS ──────────────────────────────────────────────────────
+/// All rows created before this migration have basisPoints = NULL,
+/// shareUnits = NULL, and exactAmountPaise = NULL. This is correct:
+/// EQUAL expenses carry no metadata beyond amountPaise and participant count.
 model ExpenseParticipant {
-  id         String @id @default(uuid()) @db.Uuid
-  expenseId  String @db.Uuid
-  userId     String @db.Uuid
+  id        String @id @default(uuid()) @db.Uuid
+  expenseId String @db.Uuid
+  userId    String @db.Uuid
+
+  /// ── CANONICAL ACCOUNTING FIELD — read by the balance engine ──────────────
+  /// The final computed integer share this participant owes, in paise.
+  /// SUM(sharePaise) across all participants for one expense = amountPaise.
+  /// Immutable after creation. Never null.
   sharePaise Int
+
+  /// ── SUPPLEMENTARY AUDIT FIELDS — never read by the balance engine ─────────
+  /// At most one of these three columns will be non-NULL for any given row.
+  /// The DB enforces this with the expense_participants_single_meta_chk
+  /// constraint (see migration 20260526100001). NULL means EQUAL split.
+
+  /// PERCENT split only. Participant's percentage share in basis points
+  /// (10 000 bp = 100%). Validated by service: SUM(basisPoints) = 10 000.
+  /// DB range constraint: [1, 10 000].
+  basisPoints Int?
+
+  /// SHARES split only. Raw ratio unit for this participant.
+  /// DB range constraint: [1, 1 000 000].
+  shareUnits Int?
+
+  /// EXACT split only. Client-specified exact amount in paise.
+  /// For EXACT splits, sharePaise == exactAmountPaise (no rounding).
+  /// DB range constraint: ≥ 0.
+  exactAmountPaise Int?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

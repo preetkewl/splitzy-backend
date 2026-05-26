@@ -144,6 +144,17 @@ export class AuthService {
       throw new ApiError(HTTP.NOT_FOUND, ERROR_CODES.NOT_FOUND, 'User not found');
     }
 
+    // Block deletion if the user has any unsettled balance in any trip.
+    // Both "you owe someone" and "someone owes you" are considered dues.
+    const hasDues = await this.users.hasOutstandingBalance(userId);
+    if (hasDues) {
+      throw new ApiError(
+        HTTP.CONFLICT,
+        ERROR_CODES.PENDING_DUES,
+        'You have pending dues. Please settle all balances before deleting your account.',
+      );
+    }
+
     // Revoke all refresh tokens so no new access tokens can be issued.
     await this.refreshTokens.revokeAllForUser(userId);
 

@@ -48,6 +48,12 @@ export type {
   ParticipantShare,
   SettlementTransfer,
 } from './engine/balance-engine.js';
+export type { RawParticipantInput, SplitCalculator, SplitResult } from './engine/split-types.js';
+export { SplitCalculatorRegistry, splitRegistry } from './engine/split-registry.js';
+export { EqualSplitCalculator } from './engine/calculators/equal.calculator.js';
+export { ExactSplitCalculator } from './engine/calculators/exact.calculator.js';
+export { PercentSplitCalculator } from './engine/calculators/percent.calculator.js';
+export { SharesSplitCalculator } from './engine/calculators/shares.calculator.js';
 export { ExpenseService } from './service/expense.service.js';
 export { ExpenseController } from './controller/expense.controller.js';
 export { ExpenseRepository } from './repository/expense.repository.js';

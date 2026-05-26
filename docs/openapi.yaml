@@ -1,0 +1,1166 @@
+openapi: 3.1.0
+info:
+  title: Splitzy API
+  version: 1.0.0
+  description: |
+    Backend API for Splitzy — split trip expenses among friends.
+
+    ## Authentication
+    All endpoints except `/health` require a Firebase JWT passed as a Bearer token
+    in the `Authorization` header.
+
+    ## Money representation
+    All monetary values are expressed in **paise** (1 INR = 100 paise), stored
+    and transmitted as non-negative integers.  Never send or store rupee decimals.
+
+    ## Split types
+    | splitType | Description |
+    |-----------|-------------|
+    | `EQUAL`   | Amount divided equally among all participants. Payer absorbs any 1-paise remainder. |
+    | `EXACT`   | Caller specifies each participant's exact paise amount. SUM must equal amountPaise. |
+    | `PERCENT` | Caller specifies each participant's share in basis points (10 000 bp = 100%). SUM must equal 10 000. Rounding via Largest Remainder Method. |
+    | `SHARES`  | Caller specifies a ratio unit per participant. Proportional to ratio; no sum constraint. Rounding via Largest Remainder Method. |
+
+    ## Backward compatibility
+    Old mobile clients that do not send `splitType` default to `EQUAL` automatically.
+    Old clients that send only `participantIds` (no `participants` array) continue to work.
+    New nullable fields (`basisPoints`, `shareUnits`, `exactAmountPaise`, `splitMeta`)
+    are ignored by clients that do not know them.
+
+servers:
+  - url: http://localhost:3000/api
+    description: Local development
+  - url: https://api.splitzy.app/api
+    description: Production
+
+tags:
+  - name: Expenses
+    description: Create, list, and delete trip expenses.
+  - name: Balances
+    description: Per-trip balance summaries and settlement suggestions.
+  - name: Health
+    description: Service liveness check.
+
+# ── Security ──────────────────────────────────────────────────────────────────
+
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Firebase ID token obtained from the mobile app.
+
+  # ── Shared schemas ───────────────────────────────────────────────────────────
+
+  schemas:
+
+    # ── Primitives ─────────────────────────────────────────────────────────────
+
+    Uuid:
+      type: string
+      format: uuid
+      example: "c3d9f2a1-4b5e-4f8c-9d0e-1a2b3c4d5e6f"
+
+    PaiseAmount:
+      type: integer
+      minimum: 1
+      description: Monetary amount in paise (1 INR = 100 paise).
+      example: 120000
+
+    IsoDatetime:
+      type: string
+      format: date-time
+      example: "2026-05-26T14:30:00+05:30"
+
+    ExpenseCategory:
+      type: string
+      enum:
+        - FOOD
+        - TRANSPORT
+        - ACCOMMODATION
+        - ACTIVITY
+        - SHOPPING
+        - MISC
+      default: MISC
+
+    ExpenseSplitType:
+      type: string
+      enum:
+        - EQUAL
+        - EXACT
+        - PERCENT
+        - SHARES
+      description: |
+        EQUAL   — divided equally; payer absorbs remainder.
+        EXACT   — each participant's exact paise specified.
+        PERCENT — basis-point percentages specified; sum must equal 10000.
+        SHARES  — integer ratio units specified; proportional split.
+
+    # ── User preview ───────────────────────────────────────────────────────────
+
+    UserPreview:
+      type: object
+      required: [userId, name, avatarColor, avatarUrl]
+      properties:
+        userId:
+          $ref: '#/components/schemas/Uuid'
+        name:
+          type: string
+          example: Anjali Sharma
+        avatarColor:
+          type: string
+          description: Hex colour for the avatar background.
+          example: "#4A90D9"
+        avatarUrl:
+          type: string
+          format: uri
+          nullable: true
+          example: "https://storage.splitzy.app/avatars/abc.jpg"
+
+    # ── Expense participant in response ────────────────────────────────────────
+
+    ExpenseParticipant:
+      allOf:
+        - $ref: '#/components/schemas/UserPreview'
+        - type: object
+          required: [sharePaise, basisPoints, shareUnits, exactAmountPaise]
+          properties:
+            sharePaise:
+              type: integer
+              description: |
+                Canonical accounting value. The ONLY field the balance engine reads.
+                Present for every split type. Sum of sharePaise across all participants
+                equals the expense amountPaise.
+              example: 40000
+            basisPoints:
+              type: integer
+              nullable: true
+              minimum: 1
+              maximum: 10000
+              description: |
+                PERCENT split only. The participant's share in basis points
+                (10 000 bp = 100%). Null for all other split types.
+              example: 3333
+            shareUnits:
+              type: integer
+              nullable: true
+              minimum: 1
+              maximum: 1000000
+              description: |
+                SHARES split only. The participant's ratio unit count.
+                Null for all other split types.
+              example: 3
+            exactAmountPaise:
+              type: integer
+              nullable: true
+              minimum: 0
+              description: |
+                EXACT split only. The exact paise amount the client specified.
+                Equals sharePaise for EXACT splits. Null for all other split types.
+              example: 40000
+
+    # ── Split metadata audit snapshot ──────────────────────────────────────────
+
+    ExactSplitMeta:
+      type: object
+      required: [type, participants]
+      properties:
+        type:
+          type: string
+          enum: [EXACT]
+        participants:
+          type: object
+          description: |
+            Map of userId → exactAmountPaise as originally supplied by the client.
+          additionalProperties:
+            type: integer
+            minimum: 0
+          example:
+            "user-a": 60000
+            "user-b": 40000
+            "user-c": 20000
+
+    PercentSplitMeta:
+      type: object
+      required: [type, participants]
+      properties:
+        type:
+          type: string
+          enum: [PERCENT]
+        participants:
+          type: object
+          description: |
+            Map of userId → basisPoints as originally supplied by the client.
+            Sum of all values equals 10 000.
+          additionalProperties:
+            type: integer
+            minimum: 1
+            maximum: 10000
+          example:
+            "user-a": 5000
+            "user-b": 2500
+            "user-c": 2500
+
+    SharesSplitMeta:
+      type: object
+      required: [type, participants]
+      properties:
+        type:
+          type: string
+          enum: [SHARES]
+        participants:
+          type: object
+          description: |
+            Map of userId → shareUnits as originally supplied by the client.
+          additionalProperties:
+            type: integer
+            minimum: 1
+            maximum: 1000000
+          example:
+            "user-a": 3
+            "user-b": 5
+            "user-c": 7
+
+    SplitMeta:
+      nullable: true
+      description: |
+        Immutable audit snapshot of the raw split intent originally supplied
+        by the client. Null for EQUAL expenses (reconstructible from amountPaise
+        and participant count). Discriminated by the `type` field.
+      oneOf:
+        - $ref: '#/components/schemas/ExactSplitMeta'
+        - $ref: '#/components/schemas/PercentSplitMeta'
+        - $ref: '#/components/schemas/SharesSplitMeta'
+      discriminator:
+        propertyName: type
+        mapping:
+          EXACT: '#/components/schemas/ExactSplitMeta'
+          PERCENT: '#/components/schemas/PercentSplitMeta'
+          SHARES: '#/components/schemas/SharesSplitMeta'
+
+    # ── Expense response ───────────────────────────────────────────────────────
+
+    Expense:
+      type: object
+      required:
+        - id
+        - tripId
+        - title
+        - amountPaise
+        - category
+        - splitType
+        - paidBy
+        - participants
+        - splitMeta
+        - spentAt
+        - createdAt
+        - updatedAt
+        - canDelete
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        tripId:
+          $ref: '#/components/schemas/Uuid'
+        title:
+          type: string
+          example: "Team dinner"
+        amountPaise:
+          $ref: '#/components/schemas/PaiseAmount'
+        category:
+          $ref: '#/components/schemas/ExpenseCategory'
+        splitType:
+          $ref: '#/components/schemas/ExpenseSplitType'
+        paidBy:
+          $ref: '#/components/schemas/UserPreview'
+        participants:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpenseParticipant'
+        splitMeta:
+          $ref: '#/components/schemas/SplitMeta'
+        spentAt:
+          $ref: '#/components/schemas/IsoDatetime'
+        createdAt:
+          $ref: '#/components/schemas/IsoDatetime'
+        updatedAt:
+          $ref: '#/components/schemas/IsoDatetime'
+        canDelete:
+          type: boolean
+          description: True if the authenticated user may delete this expense (creator only).
+
+    # ── Expense creation requests ──────────────────────────────────────────────
+
+    # Shared base fields — duplicated inline because OpenAPI does not support
+    # z.discriminatedUnion semantics natively. allOf+discriminator handles it.
+
+    EqualExpenseRequest:
+      type: object
+      required: [tripId, title, amountPaise, paidByUserId, spentAt]
+      properties:
+        tripId:
+          $ref: '#/components/schemas/Uuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: "Hotel night 1"
+        amountPaise:
+          $ref: '#/components/schemas/PaiseAmount'
+        paidByUserId:
+          $ref: '#/components/schemas/Uuid'
+        category:
+          $ref: '#/components/schemas/ExpenseCategory'
+        spentAt:
+          $ref: '#/components/schemas/IsoDatetime'
+        splitType:
+          type: string
+          enum: [EQUAL]
+          default: EQUAL
+          description: |
+            Omit entirely for backward compatibility with old clients.
+            When absent, the server injects EQUAL automatically.
+        participantIds:
+          type: array
+          items:
+            $ref: '#/components/schemas/Uuid'
+          minItems: 1
+          uniqueItems: true
+          description: |
+            Optional. When omitted or empty, all current trip members participate.
+            When present, only these users are included in the split.
+          example:
+            - "c3d9f2a1-4b5e-4f8c-9d0e-1a2b3c4d5e6f"
+            - "d4e0f3b2-5c6f-5a9d-0e1f-2b3c4d5e6f7a"
+
+    ExactParticipantInput:
+      type: object
+      required: [userId, exactAmountPaise]
+      properties:
+        userId:
+          $ref: '#/components/schemas/Uuid'
+        exactAmountPaise:
+          type: integer
+          minimum: 0
+          description: |
+            The exact paise amount this participant owes. May be 0 (payer
+            covering others). Sum of all exactAmountPaise values MUST equal
+            the expense amountPaise.
+          example: 60000
+
+    ExactExpenseRequest:
+      type: object
+      required: [tripId, title, amountPaise, paidByUserId, spentAt, splitType, participants]
+      properties:
+        tripId:
+          $ref: '#/components/schemas/Uuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        amountPaise:
+          $ref: '#/components/schemas/PaiseAmount'
+        paidByUserId:
+          $ref: '#/components/schemas/Uuid'
+        category:
+          $ref: '#/components/schemas/ExpenseCategory'
+        spentAt:
+          $ref: '#/components/schemas/IsoDatetime'
+        splitType:
+          type: string
+          enum: [EXACT]
+        participants:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          description: |
+            One entry per participant. All userIds must be unique.
+            SUM(exactAmountPaise) must equal the top-level amountPaise.
+          items:
+            $ref: '#/components/schemas/ExactParticipantInput'
+
+    PercentParticipantInput:
+      type: object
+      required: [userId, basisPoints]
+      properties:
+        userId:
+          $ref: '#/components/schemas/Uuid'
+        basisPoints:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          description: |
+            This participant's share in basis points (10 000 bp = 100%, 1 bp = 0.01%).
+            SUM of all basisPoints across participants must equal exactly 10 000.
+          example: 2500
+
+    PercentExpenseRequest:
+      type: object
+      required: [tripId, title, amountPaise, paidByUserId, spentAt, splitType, participants]
+      properties:
+        tripId:
+          $ref: '#/components/schemas/Uuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        amountPaise:
+          $ref: '#/components/schemas/PaiseAmount'
+        paidByUserId:
+          $ref: '#/components/schemas/Uuid'
+        category:
+          $ref: '#/components/schemas/ExpenseCategory'
+        spentAt:
+          $ref: '#/components/schemas/IsoDatetime'
+        splitType:
+          type: string
+          enum: [PERCENT]
+        participants:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          description: |
+            One entry per participant. All userIds must be unique.
+            SUM(basisPoints) must equal exactly 10 000 (100%).
+            Paise rounding uses the Largest Remainder Method (tie-break: userId ASC).
+          items:
+            $ref: '#/components/schemas/PercentParticipantInput'
+
+    SharesParticipantInput:
+      type: object
+      required: [userId, shareUnits]
+      properties:
+        userId:
+          $ref: '#/components/schemas/Uuid'
+        shareUnits:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          description: |
+            This participant's ratio unit count. Positive integer.
+            No total sum constraint — the split is proportional to each
+            participant's shareUnits relative to the total.
+          example: 3
+
+    SharesExpenseRequest:
+      type: object
+      required: [tripId, title, amountPaise, paidByUserId, spentAt, splitType, participants]
+      properties:
+        tripId:
+          $ref: '#/components/schemas/Uuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        amountPaise:
+          $ref: '#/components/schemas/PaiseAmount'
+        paidByUserId:
+          $ref: '#/components/schemas/Uuid'
+        category:
+          $ref: '#/components/schemas/ExpenseCategory'
+        spentAt:
+          $ref: '#/components/schemas/IsoDatetime'
+        splitType:
+          type: string
+          enum: [SHARES]
+        participants:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          description: |
+            One entry per participant. All userIds must be unique.
+            No sum constraint. Rounding uses the Largest Remainder Method
+            (tie-break: userId ASC).
+          items:
+            $ref: '#/components/schemas/SharesParticipantInput'
+
+    CreateExpenseRequest:
+      description: |
+        Discriminated union on `splitType`. Old clients that omit `splitType`
+        are treated as EQUAL. Each branch carries only the fields relevant
+        to that split strategy.
+      oneOf:
+        - $ref: '#/components/schemas/EqualExpenseRequest'
+        - $ref: '#/components/schemas/ExactExpenseRequest'
+        - $ref: '#/components/schemas/PercentExpenseRequest'
+        - $ref: '#/components/schemas/SharesExpenseRequest'
+      discriminator:
+        propertyName: splitType
+        mapping:
+          EQUAL: '#/components/schemas/EqualExpenseRequest'
+          EXACT: '#/components/schemas/ExactExpenseRequest'
+          PERCENT: '#/components/schemas/PercentExpenseRequest'
+          SHARES: '#/components/schemas/SharesExpenseRequest'
+
+    # ── Balance response ───────────────────────────────────────────────────────
+
+    MemberBalance:
+      allOf:
+        - $ref: '#/components/schemas/UserPreview'
+        - type: object
+          required:
+            - netPaise
+            - totalPaidPaise
+            - totalSharePaise
+            - isCurrentMember
+          properties:
+            netPaise:
+              type: integer
+              description: |
+                Net balance for this member in paise.
+                > 0: others owe this user.
+                < 0: this user owes others.
+                = 0: settled.
+              example: 80000
+            totalPaidPaise:
+              type: integer
+              minimum: 0
+              description: Sum of amountPaise for every expense this user paid.
+              example: 200000
+            totalSharePaise:
+              type: integer
+              minimum: 0
+              description: Sum of sharePaise across every expense this user participates in.
+              example: 120000
+            isCurrentMember:
+              type: boolean
+              description: False if the user has since left the trip (historical balance preserved).
+
+    SettlementSuggestion:
+      type: object
+      required: [fromUserId, toUserId, amountPaise]
+      properties:
+        fromUserId:
+          $ref: '#/components/schemas/Uuid'
+        toUserId:
+          $ref: '#/components/schemas/Uuid'
+        amountPaise:
+          type: integer
+          minimum: 1
+
+    BalanceSummary:
+      type: object
+      required:
+        - totalAmountPaise
+        - totalReimbursedPaise
+        - members
+        - suggestedTransfers
+      properties:
+        totalAmountPaise:
+          type: integer
+          minimum: 0
+          description: Sum of amountPaise across all non-deleted expenses in the trip.
+        totalReimbursedPaise:
+          type: integer
+          minimum: 0
+          description: Sum of completed settlement amounts.
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemberBalance'
+        suggestedTransfers:
+          type: array
+          description: Minimum-transfer debt simplification suggestions.
+          items:
+            $ref: '#/components/schemas/SettlementSuggestion'
+
+    # ── Pagination ─────────────────────────────────────────────────────────────
+
+    PaginationMeta:
+      type: object
+      required: [page, pageSize, total]
+      properties:
+        page:
+          type: integer
+          minimum: 1
+        pageSize:
+          type: integer
+          minimum: 1
+          maximum: 100
+        total:
+          type: integer
+          minimum: 0
+
+    # ── API envelope ───────────────────────────────────────────────────────────
+
+    SuccessEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          description: Response payload. Shape varies by endpoint.
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    ErrorEnvelope:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Machine-readable error code.
+              example: VALIDATION_FAILED
+            message:
+              type: string
+              description: Human-readable error description.
+              example: "Validation failed"
+            details:
+              type: object
+              nullable: true
+              description: Optional structured details (e.g. field-level errors).
+              properties:
+                fields:
+                  type: object
+                  additionalProperties:
+                    type: array
+                    items:
+                      type: string
+                  example:
+                    "participants.1.userId": ["Duplicate userId: \"abc\" appears more than once"]
+                    "participants": ["EXACT: exactAmountPaise values sum to 90000 paise but amountPaise is 100000 paise (difference: -10000 paise)."]
+
+  # ── Responses ────────────────────────────────────────────────────────────────
+
+  responses:
+    UnauthorizedError:
+      description: Missing or invalid Bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            error:
+              code: UNAUTHORIZED
+              message: Unauthorized
+
+    ForbiddenError:
+      description: Authenticated user lacks permission for this action.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+
+    NotFoundError:
+      description: Requested resource does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+
+    ValidationError:
+      description: Request body or query parameters failed Zod validation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            duplicate_userId:
+              summary: Duplicate participant userId
+              value:
+                success: false
+                error:
+                  code: VALIDATION_FAILED
+                  message: "Validation failed"
+                  details:
+                    fields:
+                      "participants.1.userId":
+                        - 'Duplicate userId: "abc-123" appears more than once'
+            exact_sum_mismatch:
+              summary: EXACT split sum does not match amountPaise
+              value:
+                success: false
+                error:
+                  code: VALIDATION_FAILED
+                  message: "Validation failed"
+                  details:
+                    fields:
+                      participants:
+                        - "EXACT: exactAmountPaise values sum to 90000 paise but amountPaise is 100000 paise (difference: -10000 paise)."
+            percent_sum_mismatch:
+              summary: PERCENT basisPoints do not sum to 10000
+              value:
+                success: false
+                error:
+                  code: VALIDATION_FAILED
+                  message: "Validation failed"
+                  details:
+                    fields:
+                      participants:
+                        - "PERCENT: basisPoints values sum to 9999 (99.99%) but must total exactly 10000 (100.00%)."
+            feature_flag:
+              summary: Non-EQUAL split type not yet enabled
+              value:
+                success: false
+                error:
+                  code: BAD_REQUEST
+                  message: "Split type 'PERCENT' is not available yet. Use EQUAL or update the app."
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+
+paths:
+
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness check
+      security: []
+      responses:
+        '200':
+          description: Service is alive.
+
+  # ── POST /expenses ──────────────────────────────────────────────────────────
+
+  /expenses:
+    post:
+      tags: [Expenses]
+      operationId: createExpense
+      summary: Create a new expense
+      description: |
+        Creates an expense in a trip and distributes it among participants
+        according to the chosen split strategy.
+
+        **EQUAL (default)**
+        Omit `splitType` entirely or pass `EQUAL`. Optionally supply
+        `participantIds`; if absent, all current trip members participate.
+        Old mobile clients that pre-date advanced splits continue to work
+        unchanged because `splitType` is injected server-side.
+
+        **EXACT**
+        Supply `participants[{ userId, exactAmountPaise }]`.
+        `SUM(exactAmountPaise)` must equal `amountPaise`.
+        A payer may have `exactAmountPaise: 0` (they paid but owe nothing).
+
+        **PERCENT**
+        Supply `participants[{ userId, basisPoints }]`.
+        `SUM(basisPoints)` must equal `10000` (= 100%).
+        Paise rounding uses the Largest Remainder Method; tie-break is `userId ASC`.
+
+        **SHARES**
+        Supply `participants[{ userId, shareUnits }]`.
+        No sum constraint — shares are proportional.
+        Rounding uses the Largest Remainder Method.
+
+        **Feature flag**
+        Non-EQUAL split types are gated by the `FEATURE_SPLIT_TYPES_ENABLED`
+        server-side flag. Sending `PERCENT`, `EXACT`, or `SHARES` while the flag
+        is off returns `400 BAD_REQUEST` with a clear message.
+
+        **Invariants checked**
+        1. Zod: field types, per-field ranges, uniqueness of participant userIds,
+           EXACT sum == amountPaise, PERCENT sum == 10000.
+        2. Service: trip membership, payer-in-participants.
+        3. Pre-write: SUM(sharePaise) === amountPaise (calculator invariant guard).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateExpenseRequest'
+            examples:
+              equal_implicit:
+                summary: "EQUAL (old client, no splitType)"
+                value:
+                  tripId: "c3d9f2a1-4b5e-4f8c-9d0e-1a2b3c4d5e6f"
+                  title: "Team lunch"
+                  amountPaise: 120000
+                  paidByUserId: "user-a-uuid"
+                  category: FOOD
+                  spentAt: "2026-05-26T13:00:00+05:30"
+              equal_explicit:
+                summary: "EQUAL with explicit participantIds"
+                value:
+                  tripId: "c3d9f2a1-4b5e-4f8c-9d0e-1a2b3c4d5e6f"
+                  title: "Cab to airport"
+                  amountPaise: 60000
+                  paidByUserId: "user-a-uuid"
+                  category: TRANSPORT
+                  spentAt: "2026-05-26T08:00:00+05:30"
+                  splitType: EQUAL
+                  participantIds:
+                    - "user-a-uuid"
+                    - "user-b-uuid"
+              exact:
+                summary: "EXACT split"
+                value:
+                  tripId: "c3d9f2a1-4b5e-4f8c-9d0e-1a2b3c4d5e6f"
+                  title: "Hotel room (Anjali+Rohan share, Priya alone)"
+                  amountPaise: 300000
+                  paidByUserId: "user-a-uuid"
+                  category: ACCOMMODATION
+                  spentAt: "2026-05-25T15:00:00+05:30"
+                  splitType: EXACT
+                  participants:
+                    - userId: "user-a-uuid"
+                      exactAmountPaise: 200000
+                    - userId: "user-b-uuid"
+                      exactAmountPaise: 100000
+              percent:
+                summary: "PERCENT split — 50/25/25"
+                value:
+                  tripId: "c3d9f2a1-4b5e-4f8c-9d0e-1a2b3c4d5e6f"
+                  title: "Safari booking"
+                  amountPaise: 450000
+                  paidByUserId: "user-a-uuid"
+                  category: ACTIVITY
+                  spentAt: "2026-05-24T10:00:00+05:30"
+                  splitType: PERCENT
+                  participants:
+                    - userId: "user-a-uuid"
+                      basisPoints: 5000
+                    - userId: "user-b-uuid"
+                      basisPoints: 2500
+                    - userId: "user-c-uuid"
+                      basisPoints: 2500
+              shares:
+                summary: "SHARES split — 3:5:7"
+                value:
+                  tripId: "c3d9f2a1-4b5e-4f8c-9d0e-1a2b3c4d5e6f"
+                  title: "Food supplies"
+                  amountPaise: 90000
+                  paidByUserId: "user-b-uuid"
+                  category: FOOD
+                  spentAt: "2026-05-23T18:00:00+05:30"
+                  splitType: SHARES
+                  participants:
+                    - userId: "user-a-uuid"
+                      shareUnits: 3
+                    - userId: "user-b-uuid"
+                      shareUnits: 5
+                    - userId: "user-c-uuid"
+                      shareUnits: 7
+      responses:
+        '201':
+          description: Expense created successfully.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Expense'
+              examples:
+                equal_response:
+                  summary: EQUAL expense response
+                  value:
+                    success: true
+                    data:
+                      id: "e1a2b3c4-0001-0000-0000-000000000000"
+                      tripId: "c3d9f2a1-4b5e-4f8c-9d0e-1a2b3c4d5e6f"
+                      title: "Team lunch"
+                      amountPaise: 120000
+                      category: FOOD
+                      splitType: EQUAL
+                      paidBy:
+                        userId: "user-a-uuid"
+                        name: "Anjali Sharma"
+                        avatarColor: "#4A90D9"
+                        avatarUrl: null
+                      participants:
+                        - userId: "user-a-uuid"
+                          name: "Anjali Sharma"
+                          avatarColor: "#4A90D9"
+                          avatarUrl: null
+                          sharePaise: 40000
+                          basisPoints: null
+                          shareUnits: null
+                          exactAmountPaise: null
+                        - userId: "user-b-uuid"
+                          name: "Rohan Mehta"
+                          avatarColor: "#E84393"
+                          avatarUrl: null
+                          sharePaise: 40000
+                          basisPoints: null
+                          shareUnits: null
+                          exactAmountPaise: null
+                        - userId: "user-c-uuid"
+                          name: "Priya Patel"
+                          avatarColor: "#27AE60"
+                          avatarUrl: null
+                          sharePaise: 40000
+                          basisPoints: null
+                          shareUnits: null
+                          exactAmountPaise: null
+                      splitMeta: null
+                      spentAt: "2026-05-26T13:00:00.000Z"
+                      createdAt: "2026-05-26T14:12:33.000Z"
+                      updatedAt: "2026-05-26T14:12:33.000Z"
+                      canDelete: true
+                percent_response:
+                  summary: PERCENT expense response (50/25/25, LRM rounding)
+                  value:
+                    success: true
+                    data:
+                      id: "e2b3c4d5-0002-0000-0000-000000000000"
+                      tripId: "c3d9f2a1-4b5e-4f8c-9d0e-1a2b3c4d5e6f"
+                      title: "Safari booking"
+                      amountPaise: 450000
+                      category: ACTIVITY
+                      splitType: PERCENT
+                      paidBy:
+                        userId: "user-a-uuid"
+                        name: "Anjali Sharma"
+                        avatarColor: "#4A90D9"
+                        avatarUrl: null
+                      participants:
+                        - userId: "user-a-uuid"
+                          name: "Anjali Sharma"
+                          avatarColor: "#4A90D9"
+                          avatarUrl: null
+                          sharePaise: 225000
+                          basisPoints: 5000
+                          shareUnits: null
+                          exactAmountPaise: null
+                        - userId: "user-b-uuid"
+                          name: "Rohan Mehta"
+                          avatarColor: "#E84393"
+                          avatarUrl: null
+                          sharePaise: 112500
+                          basisPoints: 2500
+                          shareUnits: null
+                          exactAmountPaise: null
+                        - userId: "user-c-uuid"
+                          name: "Priya Patel"
+                          avatarColor: "#27AE60"
+                          avatarUrl: null
+                          sharePaise: 112500
+                          basisPoints: 2500
+                          shareUnits: null
+                          exactAmountPaise: null
+                      splitMeta:
+                        type: PERCENT
+                        participants:
+                          "user-a-uuid": 5000
+                          "user-b-uuid": 2500
+                          "user-c-uuid": 2500
+                      spentAt: "2026-05-24T10:00:00.000Z"
+                      createdAt: "2026-05-26T14:13:01.000Z"
+                      updatedAt: "2026-05-26T14:13:01.000Z"
+                      canDelete: true
+        '400':
+          description: Business logic error (feature flag, payer not in participants, etc.).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  # ── DELETE /expenses/:expenseId ─────────────────────────────────────────────
+
+  /expenses/{expenseId}:
+    delete:
+      tags: [Expenses]
+      operationId: deleteExpense
+      summary: Soft-delete an expense
+      description: |
+        Marks an expense as deleted. Only the expense creator may delete it.
+        Historical data (shares, balances at time of creation) is preserved in
+        the database — `deletedAt` is set but the row is not removed.
+      parameters:
+        - name: expenseId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/Uuid'
+      responses:
+        '204':
+          description: Expense deleted. No response body.
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+  # ── GET /trips/:tripId/expenses ─────────────────────────────────────────────
+
+  /trips/{tripId}/expenses:
+    get:
+      tags: [Expenses]
+      operationId: listExpenses
+      summary: List expenses for a trip (paginated)
+      description: |
+        Returns a paginated list of non-deleted expenses for the given trip,
+        ordered by `spentAt DESC` then `createdAt DESC`.
+        The caller must be a trip member.
+      parameters:
+        - name: tripId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/Uuid'
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Paginated expense list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Expense'
+                      meta:
+                        $ref: '#/components/schemas/PaginationMeta'
+              example:
+                success: true
+                meta:
+                  page: 1
+                  pageSize: 20
+                  total: 5
+                data:
+                  - id: "e1a2b3c4-0001-0000-0000-000000000000"
+                    tripId: "c3d9f2a1-4b5e-4f8c-9d0e-1a2b3c4d5e6f"
+                    title: "Team lunch"
+                    amountPaise: 120000
+                    category: FOOD
+                    splitType: EQUAL
+                    paidBy:
+                      userId: "user-a-uuid"
+                      name: "Anjali Sharma"
+                      avatarColor: "#4A90D9"
+                      avatarUrl: null
+                    participants:
+                      - userId: "user-a-uuid"
+                        name: "Anjali Sharma"
+                        avatarColor: "#4A90D9"
+                        avatarUrl: null
+                        sharePaise: 40000
+                        basisPoints: null
+                        shareUnits: null
+                        exactAmountPaise: null
+                    splitMeta: null
+                    spentAt: "2026-05-26T13:00:00.000Z"
+                    createdAt: "2026-05-26T14:12:33.000Z"
+                    updatedAt: "2026-05-26T14:12:33.000Z"
+                    canDelete: true
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  # ── GET /trips/:tripId/balances ─────────────────────────────────────────────
+
+  /trips/{tripId}/balances:
+    get:
+      tags: [Balances]
+      operationId: getTripBalances
+      summary: Get balance summary for a trip
+      description: |
+        Returns the current balance state for all members of a trip, including
+        the payer credit, participant debts, net per-user balance, and a
+        minimum-transfer debt simplification (suggested settlements).
+
+        The balance engine is split-type-agnostic: it reads only `sharePaise`,
+        which is always present regardless of how the expense was split. This
+        means EQUAL, EXACT, PERCENT, and SHARES expenses are all handled
+        identically by the engine — only the `sharePaise` values differ.
+
+        Completed settlements are applied before suggesting new transfers.
+        Former trip members (who have since left) appear in the balance list
+        with `isCurrentMember: false` if they have outstanding balances.
+      parameters:
+        - name: tripId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/Uuid'
+      responses:
+        '200':
+          description: Balance summary for the trip.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BalanceSummary'
+              example:
+                success: true
+                data:
+                  totalAmountPaise: 570000
+                  totalReimbursedPaise: 0
+                  members:
+                    - userId: "user-a-uuid"
+                      name: "Anjali Sharma"
+                      avatarColor: "#4A90D9"
+                      avatarUrl: null
+                      netPaise: 152500
+                      totalPaidPaise: 450000
+                      totalSharePaise: 297500
+                      isCurrentMember: true
+                    - userId: "user-b-uuid"
+                      name: "Rohan Mehta"
+                      avatarColor: "#E84393"
+                      avatarUrl: null
+                      netPaise: -76250
+                      totalPaidPaise: 120000
+                      totalSharePaise: 196250
+                      isCurrentMember: true
+                    - userId: "user-c-uuid"
+                      name: "Priya Patel"
+                      avatarColor: "#27AE60"
+                      avatarUrl: null
+                      netPaise: -76250
+                      totalPaidPaise: 0
+                      totalSharePaise: 76250
+                      isCurrentMember: true
+                  suggestedTransfers:
+                    - fromUserId: "user-b-uuid"
+                      toUserId: "user-a-uuid"
+                      amountPaise: 76250
+                    - fromUserId: "user-c-uuid"
+                      toUserId: "user-a-uuid"
+                      amountPaise: 76250
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'

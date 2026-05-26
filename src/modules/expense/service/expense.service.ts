@@ -1,5 +1,7 @@
-import { ExpenseCategory, type User } from '@prisma/client';
+import { ExpenseCategory, ExpenseSplitType, type User } from '@prisma/client';
+import type { Prisma } from '@prisma/client';
 import { ApiError } from '../../../core/api-error.js';
+import { env } from '../../../config/env.js';
 import { paginate, type PaginationInput } from '../../../database/helpers.js';
 import { logger } from '../../../utils/logger.js';
 import type { IUserRepository } from '../../auth/repository/user.repository.js';
@@ -13,6 +15,8 @@ import type {
   ExpenseDto,
 } from '../dto/index.js';
 import { BalanceEngine, type SettlementTransfer } from '../engine/balance-engine.js';
+import type { RawParticipantInput, SplitResult } from '../engine/split-types.js';
+import { splitRegistry } from '../engine/split-registry.js';
 import {
   toBalanceSummary,
   toExpenseDto,
@@ -43,69 +47,120 @@ export class ExpenseService {
   // ── create ────────────────────────────────────────────────────────────────
 
   async create(userId: string, input: CreateExpenseInput): Promise<ExpenseDto> {
-    // 1. Caller must be a trip member.
+    const splitType = input.splitType ?? ExpenseSplitType.EQUAL;
+
+    // 1. Feature flag: non-EQUAL split types are gated until the matching
+    //    frontend build is in production. Old clients never send splitType,
+    //    so they are always routed to EQUAL and are unaffected by this flag.
+    if (splitType !== ExpenseSplitType.EQUAL && !env.FEATURE_SPLIT_TYPES_ENABLED) {
+      throw ApiError.badRequest(
+        `Split type '${splitType}' is not available yet. Use EQUAL or update the app.`,
+      );
+    }
+
+    // 2. Caller must be a trip member.
     await this.access.assertMember(input.tripId, userId);
 
-    // 2. Pull current trip members once — used for default participants
-    //    + payer membership check + participant membership check.
+    // 3. Pull current trip members once — used for participant defaulting,
+    //    payer check, and participant membership validation.
     const trip = await this.trips.findDetail(input.tripId);
     if (trip === null) throw ApiError.notFound('Trip not found');
     const memberIds = new Set(trip.members.map((m) => m.userId));
 
-    // 3. Payer must be a trip member.
+    // 4. Payer must be a current trip member.
     if (!memberIds.has(input.paidByUserId)) {
       throw ApiError.badRequest('Payer is not a member of this trip');
     }
 
-    // 4. Resolve participants — default = all current members.
-    const participantIds =
-      input.participantIds === undefined || input.participantIds.length === 0
-        ? trip.members.map((m) => m.userId)
-        : Array.from(new Set(input.participantIds));
+    // 5. Resolve raw participant inputs based on split type.
+    const rawParticipants = this.resolveRawParticipants(input, trip.members);
 
-    if (participantIds.length === 0) {
+    if (rawParticipants.length === 0) {
       throw ApiError.badRequest('At least one participant is required');
     }
 
-    // 5. All participants must be current trip members.
-    for (const id of participantIds) {
-      if (!memberIds.has(id)) {
-        throw ApiError.badRequest(`Participant ${id} is not a member of this trip`);
+    // 6. Every participant must be a current trip member.
+    for (const p of rawParticipants) {
+      if (!memberIds.has(p.userId)) {
+        throw ApiError.badRequest(`Participant ${p.userId} is not a member of this trip`);
       }
     }
 
-    // 6. Payer must be in the participant list (equal-split semantics).
-    if (!participantIds.includes(input.paidByUserId)) {
-      throw ApiError.badRequest('Payer must be one of the participants');
+    // 7. Payer must appear in the participant list for all split types.
+    //    For EQUAL: they always owe their share.
+    //    For EXACT: their exactAmountPaise may be 0 (they covered everyone).
+    //    For PERCENT / SHARES: basisPoints / shareUnits must be ≥ 1 (Zod
+    //    already enforced this at the API boundary).
+    const payerInParticipants = rawParticipants.some((p) => p.userId === input.paidByUserId);
+    if (!payerInParticipants) {
+      throw ApiError.badRequest('Payer must be included in the participant list');
     }
 
-    // 7. Compute the equal split. Engine guarantees SUM(shares) == amount.
-    const shares = BalanceEngine.splitEqual(
-      input.amountPaise,
-      participantIds,
-      input.paidByUserId,
-    );
+    // 8. Dispatch to the appropriate calculator via the registry.
+    //    The calculator is a pure function: no DB access, no side effects.
+    //    It throws with a descriptive error if inputs violate its preconditions
+    //    (e.g. PERCENT basisPoints don't sum to 10 000).
+    let splitResults: SplitResult[];
+    try {
+      splitResults = splitRegistry.compute(splitType, input.amountPaise, rawParticipants, input.paidByUserId);
+    } catch (err) {
+      // Calculator errors indicate invalid client input (wrong sums, missing
+      // fields). Surface them as 400 Bad Request rather than 500.
+      const message = err instanceof Error ? err.message : String(err);
+      throw ApiError.badRequest(message);
+    }
 
-    // 8. Persist. Prisma's nested-create wraps the insert + participants in
-    //    one statement; we don't need an explicit $transaction here because
-    //    the engine has already validated the math invariant.
+    // 9. Write-time invariant: SUM(sharePaise) must equal amountPaise exactly.
+    //    The calculator is responsible for this; this assertion is the last
+    //    line of defense before the DB write. A violation here is a bug in
+    //    the calculator, not a user error — log it loudly.
+    const shareSum = splitResults.reduce((acc, s) => acc + s.sharePaise, 0);
+    if (shareSum !== input.amountPaise) {
+      logger.error(
+        {
+          splitType,
+          amountPaise: input.amountPaise,
+          shareSum,
+          diff: shareSum - input.amountPaise,
+        },
+        'split invariant violated — calculator produced wrong sum',
+      );
+      throw new Error(
+        `Split invariant violated: shares sum to ${String(shareSum)} paise but ` +
+          `expense is ${String(input.amountPaise)} paise (diff: ${String(shareSum - input.amountPaise)})`,
+      );
+    }
+
+    // 10. Build the immutable audit snapshot for non-EQUAL splits.
+    const splitMeta = this.buildSplitMeta(splitType, rawParticipants);
+
+    // 11. Persist. The nested-create is atomic at the Prisma level.
+    //     SplitResult[] maps cleanly to CreateExpenseData.shares.
     const created = await this.expenses.create({
       tripId: input.tripId,
       title: input.title.trim(),
       amountPaise: input.amountPaise,
       category: input.category ?? ExpenseCategory.MISC,
+      splitType,
       paidById: input.paidByUserId,
       createdById: userId,
       spentAt: input.spentAt,
-      shares,
+      shares: splitResults,
+      splitMeta,
     });
 
     logger.info(
-      { expenseId: created.id, tripId: input.tripId, amountPaise: input.amountPaise },
+      {
+        expenseId: created.id,
+        tripId: input.tripId,
+        splitType,
+        amountPaise: input.amountPaise,
+        participantCount: splitResults.length,
+      },
       'expense created',
     );
 
-    // Notify all trip members except the payer.
+    // 12. Notify all trip members except the payer (fire-and-forget).
     const notifyUserIds = trip.members
       .map((m) => m.userId)
       .filter((id) => id !== input.paidByUserId);
@@ -133,9 +188,7 @@ export class ExpenseService {
     const { rows, total } = await this.expenses.listByTrip(tripId, params);
 
     return {
-      items: rows.map((row) =>
-        toExpenseDto(row, { viewerUserId: userId }),
-      ),
+      items: rows.map((row) => toExpenseDto(row, { viewerUserId: userId })),
       page: params.page,
       pageSize: params.pageSize,
       total,
@@ -148,11 +201,8 @@ export class ExpenseService {
     const expense = await this.expenses.findById(expenseId);
     if (expense === null) throw ApiError.notFound('Expense not found');
 
-    // Caller must be a trip member — covers the case where the expense
-    // exists but for a trip the caller can't see (404, not 403).
     await this.access.assertMember(expense.tripId, userId);
 
-    // Permission: only the expense creator can delete.
     if (expense.createdById !== userId) {
       throw ApiError.forbidden('Only the expense creator can delete an expense');
     }
@@ -168,17 +218,17 @@ export class ExpenseService {
     const trip = await this.trips.findDetail(tripId);
     if (trip === null) throw ApiError.notFound('Trip not found');
 
-    // 1. Pull aggregated expense + completed-settlement data in parallel.
-    //    Both are lean projections (no User joins) — those happen in step 5
-    //    only for the userIds the engine surfaces.
     const [expenseRows, settlementRows] = await Promise.all([
       this.expenses.findForBalances(tripId),
       this.settlements.findCompletedForBalances(tripId),
     ]);
 
-    // 2. Build per-user totals (paid + share) alongside the engine input.
+    // Build per-user totals alongside the engine input. The balance engine
+    // is entirely split-type-agnostic: it reads only sharePaise, which is
+    // the canonical accounting value regardless of how it was computed.
     const totalsByUser = new Map<string, { paid: number; share: number }>();
     let totalAmountPaise = 0;
+
     for (const e of expenseRows) {
       totalAmountPaise += e.amountPaise;
       const payerTotals = totalsByUser.get(e.payerId) ?? { paid: 0, share: 0 };
@@ -191,15 +241,10 @@ export class ExpenseService {
       }
     }
 
-    // 3. Stable member order: by joinedAt ASC (already the trip mapper order).
     const orderedMembers: TripMemberWithUser[] = trip.members;
     const orderedMemberIds = orderedMembers.map((m) => m.userId);
     const currentMemberIds = new Set(orderedMemberIds);
 
-    // 4. Run the engine. Settlements pass through with the same shape the
-    //    engine emits from `simplify` — the engine treats them as the
-    //    inverse of a suggested transfer (each one cancels itself out
-    //    of the net balances).
     const completedTransfers: SettlementTransfer[] = settlementRows.map((s) => ({
       fromUserId: s.fromUserId,
       toUserId: s.toUserId,
@@ -209,6 +254,7 @@ export class ExpenseService {
       (sum, t) => sum + t.amountPaise,
       0,
     );
+
     const netBalances = BalanceEngine.computeNetBalances(
       orderedMemberIds,
       expenseRows,
@@ -216,14 +262,9 @@ export class ExpenseService {
     );
     const transfers = BalanceEngine.simplify(netBalances);
 
-    // 5. Resolve user metadata. Members come from the trip detail; any
-    //    "extra" users (former members with residual balance) are fetched
-    //    in one batch from the User repo.
     const userById = new Map<string, User>();
     for (const m of orderedMembers) userById.set(m.userId, m.user);
-    const missing = netBalances
-      .map((b) => b.userId)
-      .filter((id) => !userById.has(id));
+    const missing = netBalances.map((b) => b.userId).filter((id) => !userById.has(id));
     for (const id of missing) {
       const u = await this.users.findById(id);
       if (u !== null) userById.set(id, u);
@@ -242,5 +283,80 @@ export class ExpenseService {
       members: memberBalances,
       transfers,
     });
+  }
+
+  // ── Private helpers ───────────────────────────────────────────────────────
+
+  /**
+   * Translate the typed CreateExpenseInput into the flat RawParticipantInput
+   * list the calculators consume.
+   *
+   * EQUAL: uses participantIds (or all current members when absent).
+   *        Each entry carries only userId — no amount fields.
+   *
+   * EXACT / PERCENT / SHARES: uses `input.participants` directly.
+   *        The Zod schema guarantees the correct per-type field is present.
+   */
+  private resolveRawParticipants(
+    input: CreateExpenseInput,
+    members: TripMemberWithUser[],
+  ): RawParticipantInput[] {
+    if (input.splitType === ExpenseSplitType.EQUAL || input.splitType === undefined) {
+      const ids =
+        input.participantIds === undefined || input.participantIds.length === 0
+          ? members.map((m) => m.userId)
+          : Array.from(new Set(input.participantIds));
+      return ids.map((userId) => ({ userId }));
+    }
+
+    // For EXACT / PERCENT / SHARES the participants array is required and
+    // was validated by Zod to contain at least one entry.
+    if (input.participants === undefined || input.participants.length === 0) {
+      throw ApiError.badRequest(
+        `participants is required for split type '${input.splitType}'`,
+      );
+    }
+
+    // Deduplicate by userId — last entry wins (mirrors equal-split dedup).
+    const seen = new Map<string, RawParticipantInput>();
+    for (const p of input.participants) {
+      seen.set(p.userId, p);
+    }
+    return Array.from(seen.values());
+  }
+
+  /**
+   * Build the immutable splitMeta JSON snapshot stored on the Expense row.
+   *
+   * Returns null for EQUAL — the split is fully reconstructible from
+   * amountPaise and participant count, so metadata would be redundant.
+   *
+   * For other types, stores a { participants: { userId → rawValue } } map
+   * where rawValue is the per-participant figure the client originally supplied
+   * (exactAmountPaise / basisPoints / shareUnits respectively). The balance
+   * engine never reads this field; it is audit/display data only.
+   */
+  private buildSplitMeta(
+    splitType: ExpenseSplitType,
+    rawParticipants: readonly RawParticipantInput[],
+  ): Prisma.InputJsonValue | null {
+    if (splitType === ExpenseSplitType.EQUAL) return null;
+
+    const participants: Record<string, number> = {};
+
+    for (const p of rawParticipants) {
+      let value: number;
+      if (splitType === ExpenseSplitType.EXACT) {
+        value = p.exactAmountPaise ?? 0;
+      } else if (splitType === ExpenseSplitType.PERCENT) {
+        value = p.basisPoints ?? 0;
+      } else {
+        // SHARES
+        value = p.shareUnits ?? 0;
+      }
+      participants[p.userId] = value;
+    }
+
+    return { type: splitType, participants };
   }
 }

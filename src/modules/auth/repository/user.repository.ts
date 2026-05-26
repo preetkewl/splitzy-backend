@@ -1,4 +1,5 @@
 import type { PrismaClient, User } from '@prisma/client';
+import { SettlementStatus } from '@prisma/client';
 
 export interface CreateUserInput {
   firebaseUid: string;
@@ -26,6 +27,12 @@ export interface IUserRepository {
   create(input: CreateUserInput): Promise<User>;
   update(id: string, input: UpdateUserInput): Promise<User>;
   softDelete(id: string): Promise<User>;
+  /**
+   * Returns true if the user has any non-zero net balance across all their
+   * trips (i.e. they either owe money or are owed money somewhere).
+   * Used to guard account deletion.
+   */
+  hasOutstandingBalance(userId: string): Promise<boolean>;
 }
 
 export class UserRepository implements IUserRepository {
@@ -72,5 +79,62 @@ export class UserRepository implements IUserRepository {
         deletedAt: new Date(),
       },
     });
+  }
+
+  /**
+   * Returns true if the user has a non-zero net balance in ANY single trip.
+   *
+   * Why per-trip instead of a global aggregate?
+   * A global sum can reach zero even when real debts exist — e.g. if the
+   * user owes ₹100 to Alice in Trip 1 and is owed ₹100 by Bob in Trip 2,
+   * the totals cancel out globally but neither obligation has been settled.
+   * Checking each trip independently prevents deletion in that case.
+   *
+   * Per-trip net formula (same as TripService.getMemberNetBalance):
+   *   net = totalPaid − totalShare + settledOut − settledIn
+   *
+   * Runs 4 parallel aggregates per trip — acceptable for a rare,
+   * user-triggered delete operation.
+   */
+  async hasOutstandingBalance(userId: string): Promise<boolean> {
+    const memberships = await this.prisma.tripMember.findMany({
+      where: { userId },
+      select: { tripId: true },
+    });
+
+    for (const { tripId } of memberships) {
+      const [paid, owed, settledOut, settledIn] = await Promise.all([
+        // What the user paid as expense payer in this trip
+        this.prisma.expense.aggregate({
+          where: { tripId, paidById: userId, deletedAt: null },
+          _sum: { amountPaise: true },
+        }),
+        // What the user owes as a participant in this trip
+        this.prisma.expenseParticipant.aggregate({
+          where: { userId, expense: { tripId, deletedAt: null } },
+          _sum: { sharePaise: true },
+        }),
+        // Settlements the user sent in this trip (reduces debt)
+        this.prisma.settlement.aggregate({
+          where: { tripId, fromUserId: userId, status: SettlementStatus.COMPLETED },
+          _sum: { amountPaise: true },
+        }),
+        // Settlements the user received in this trip (reduces credit)
+        this.prisma.settlement.aggregate({
+          where: { tripId, toUserId: userId, status: SettlementStatus.COMPLETED },
+          _sum: { amountPaise: true },
+        }),
+      ]);
+
+      const net =
+        (paid._sum.amountPaise ?? 0) -
+        (owed._sum.sharePaise ?? 0) +
+        (settledOut._sum.amountPaise ?? 0) -
+        (settledIn._sum.amountPaise ?? 0);
+
+      if (net !== 0) return true;
+    }
+
+    return false;
   }
 }

@@ -27,6 +27,15 @@ const envSchema = z.object({
   LOG_LEVEL: z
     .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
     .default('info'),
+
+  // ── Feature flags ────────────────────────────────────────────────────────────
+  // Gate all non-EQUAL split types (EXACT / PERCENT / SHARES). Set to 'true'
+  // only after the matching frontend build is in production. Old clients never
+  // send splitType at all, so they are unaffected regardless of this flag.
+  FEATURE_SPLIT_TYPES_ENABLED: z
+    .string()
+    .default('false')
+    .transform((v) => v === 'true'),
 });
 
 export type Env = z.infer<typeof envSchema>;

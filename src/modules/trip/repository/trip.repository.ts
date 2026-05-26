@@ -75,6 +75,12 @@ export interface ITripRepository {
 
 const memberInclude = {
   members: {
+    // Exclude soft-deleted users so they never appear in "Paid by" /
+    // "Split with" selectors, default-participant lists, or push-notify
+    // targets. Historical expense rows that reference a deleted user are
+    // preserved in the DB; the balance engine surfaces them as "extras"
+    // (non-current members) so the balance screen remains correct.
+    where: { user: { deletedAt: null } },
     include: { user: true },
     orderBy: { joinedAt: Prisma.SortOrder.asc },
   },

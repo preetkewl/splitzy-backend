@@ -176,6 +176,12 @@ export class FakeUserRepository implements IUserRepository {
     this.store.users.set(id, next);
     return next;
   }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async hasOutstandingBalance(_userId: string): Promise<boolean> {
+    // Smoke-test stub — always returns false (no dues) so delete flows proceed.
+    return false;
+  }
 }
 
 // ── RefreshToken repo ────────────────────────────────────────────────────────
@@ -456,6 +462,9 @@ export class FakeExpenseRepository implements IExpenseRepository {
       amountPaise: data.amountPaise,
       category: data.category,
       splitType: 'EQUAL',
+      // splitMeta is null for EQUAL splits — the audit snapshot is only
+      // populated by the service layer for non-EQUAL split types.
+      splitMeta: null,
       paidById: data.paidById,
       createdById: data.createdById,
       spentAt: data.spentAt,
@@ -470,6 +479,11 @@ export class FakeExpenseRepository implements IExpenseRepository {
         expenseId: expense.id,
         userId: s.userId,
         sharePaise: s.sharePaise,
+        // Audit metadata fields: null for EQUAL splits. Non-EQUAL splits have
+        // exactly one of these set; the DB enforces single_meta_chk constraint.
+        basisPoints: null,
+        shareUnits: null,
+        exactAmountPaise: null,
         createdAt: now,
         updatedAt: now,
       };

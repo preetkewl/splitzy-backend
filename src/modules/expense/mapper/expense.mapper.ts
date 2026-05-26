@@ -5,6 +5,7 @@ import type {
   ExpenseParticipantDto,
   MemberBalanceDto,
   SettlementSuggestionDto,
+  SplitMetaDto,
   UserPreviewDto,
 } from '../dto/index.js';
 import type {
@@ -28,7 +29,13 @@ export function toUserPreview(user: User): UserPreviewDto {
 export function toExpenseParticipant(p: ExpenseParticipantWithUser): ExpenseParticipantDto {
   return {
     ...toUserPreview(p.user),
+    // Canonical accounting value — always present.
     sharePaise: p.sharePaise,
+    // Audit metadata — null for EQUAL splits, one field populated for others.
+    // Old clients that don't recognise these fields receive null and are unaffected.
+    basisPoints: p.basisPoints,
+    shareUnits: p.shareUnits,
+    exactAmountPaise: p.exactAmountPaise,
   };
 }
 
@@ -47,6 +54,13 @@ export function toExpenseDto(
     splitType: row.splitType,
     paidBy: toUserPreview(row.paidBy),
     participants: row.participants.map(toExpenseParticipant),
+    // Audit snapshot — null for EQUAL expenses, structured JSON for others.
+    // Prisma returns the JSONB column as `JsonValue` (object | null). We cast
+    // to the typed SplitMetaDto union. The cast is safe because the service's
+    // buildSplitMeta() always produces exactly this shape: { type, participants }.
+    // Old EQUAL expenses have this column as NULL in the DB, which Prisma
+    // deserialises as null — correct for SplitMetaDto | null.
+    splitMeta: row.splitMeta as SplitMetaDto | null,
     spentAt: row.spentAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

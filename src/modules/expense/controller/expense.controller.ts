@@ -1,7 +1,9 @@
+import { ExpenseSplitType } from '@prisma/client';
 import type { Request, Response } from 'express';
 import { ApiError } from '../../../core/api-error.js';
 import { ApiResponse } from '../../../core/api-response.js';
 import { asyncHandler } from '../../../core/async-handler.js';
+import type { CreateExpenseInput } from '../dto/index.js';
 import type { ExpenseService } from '../service/expense.service.js';
 import type {
   CreateExpenseBody,
@@ -18,15 +20,8 @@ export class ExpenseController {
 
   create = asyncHandler(async (req: WithBody<CreateExpenseBody>, res: Response) => {
     const userId = this.requireUserId(req);
-    const expense = await this.expenses.create(userId, {
-      tripId: req.body.tripId,
-      title: req.body.title,
-      amountPaise: req.body.amountPaise,
-      paidByUserId: req.body.paidByUserId,
-      participantIds: req.body.participantIds,
-      category: req.body.category,
-      spentAt: req.body.spentAt,
-    });
+    const input = toCreateExpenseInput(req.body);
+    const expense = await this.expenses.create(userId, input);
     return ApiResponse.created(res, expense);
   });
 
@@ -63,5 +58,60 @@ export class ExpenseController {
       throw ApiError.unauthorized('Auth middleware did not run');
     }
     return req.user.id;
+  }
+}
+
+/**
+ * Convert the Zod-validated discriminated union body into the flat
+ * CreateExpenseInput DTO the service consumes.
+ *
+ * The body type is a union of four shapes keyed on `splitType`. TypeScript
+ * requires us to narrow the union before accessing split-specific fields
+ * (participantIds / participants) to avoid compile errors. We do this with a
+ * switch rather than casting so TypeScript can verify exhaustiveness.
+ */
+function toCreateExpenseInput(body: CreateExpenseBody): CreateExpenseInput {
+  // Common fields present on every union member.
+  const base = {
+    tripId: body.tripId,
+    title: body.title,
+    amountPaise: body.amountPaise,
+    paidByUserId: body.paidByUserId,
+    category: body.category,
+    spentAt: body.spentAt,
+  } as const;
+
+  switch (body.splitType) {
+    case ExpenseSplitType.EQUAL:
+      return {
+        ...base,
+        splitType: ExpenseSplitType.EQUAL,
+        participantIds: body.participantIds,
+      };
+
+    case ExpenseSplitType.EXACT:
+      return {
+        ...base,
+        splitType: ExpenseSplitType.EXACT,
+        // body.participants is { userId, exactAmountPaise }[] which satisfies
+        // RawParticipantInput (all non-userId fields are optional on that type).
+        participants: body.participants,
+      };
+
+    case ExpenseSplitType.PERCENT:
+      return {
+        ...base,
+        splitType: ExpenseSplitType.PERCENT,
+        // body.participants is { userId, basisPoints }[]
+        participants: body.participants,
+      };
+
+    case ExpenseSplitType.SHARES:
+      return {
+        ...base,
+        splitType: ExpenseSplitType.SHARES,
+        // body.participants is { userId, shareUnits }[]
+        participants: body.participants,
+      };
   }
 }
