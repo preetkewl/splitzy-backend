@@ -47,7 +47,7 @@ export interface TripSummaryDto {
   memberCount: number;
   /** All trip members; small lists (<= MAX_TRIP_MEMBERS = 50). */
   members: TripMemberPreviewDto[];
-  totalAmountPaise: number;
+  totalAmountMinor: number;
   latestExpenseAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -59,9 +59,9 @@ export interface TripSummaryDto {
  * expense module will fill in non-zero values.
  */
 export interface TripBalanceSummaryDto {
-  totalAmountPaise: number;
-  settledAmountPaise: number;
-  pendingAmountPaise: number;
+  totalAmountMinor: number;
+  settledAmountMinor: number;
+  pendingAmountMinor: number;
 }
 
 export interface TripDetailDto {
@@ -73,7 +73,7 @@ export interface TripDetailDto {
   isOwner: boolean;
   memberCount: number;
   members: TripMemberDto[];
-  totalAmountPaise: number;
+  totalAmountMinor: number;
   latestExpenseAt: string | null;
   createdAt: string;
   updatedAt: string;

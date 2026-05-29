@@ -1,8 +1,9 @@
 // Splitzy — backend Prisma schema.
 //
-// Money is stored as INTEGER paise (₹1 = 100 paise). Never use Float/Decimal
-// for amounts — the Flutter client sends and renders ints, and SUM aggregates
-// must round-trip exactly.
+// Money is stored as INTEGER minor units (the smallest indivisible unit of the
+// expense's currency: cents for USD, paise for INR, yen for JPY, fils for KWD).
+// Never use Float/Decimal for amounts — the Flutter client sends and renders ints,
+// and SUM aggregates must round-trip exactly.
 //
 // All primary keys are UUIDs (Postgres-native `uuid` via @db.Uuid). UUIDs are
 // generated app-side via Prisma's @default(uuid()) so we don't depend on the
@@ -42,9 +43,9 @@ enum ExpenseCategory {
 /// How an expense's total amount is divided among its participants.
 ///
 /// The split type is an INPUT STRATEGY only. It drives which calculator the
-/// service layer invokes to produce per-participant sharePaise values before
+/// service layer invokes to produce per-participant shareMinor values before
 /// writing to the database. Once written, the balance engine is completely
-/// agnostic to split type — it reads only ExpenseParticipant.sharePaise.
+/// agnostic to split type — it reads only ExpenseParticipant.shareMinor.
 ///
 /// Adding a new value here requires:
 ///   1. A dedicated migration file containing ONLY the ALTER TYPE … ADD VALUE
@@ -52,25 +53,25 @@ enum ExpenseCategory {
 ///   2. A new SplitCalculator implementation in the service layer.
 ///   3. Updated Zod validation to accept the new type's input shape.
 ///
-/// EQUAL   — Every participant owes floor(amountPaise / n). The payer absorbs
-///           the floor-division remainder so SUM(sharePaise) = amountPaise
+/// EQUAL   — Every participant owes floor(amountMinor / n). The payer absorbs
+///           the floor-division remainder so SUM(shareMinor) = amountMinor
 ///           exactly. No metadata columns are populated on
-///           ExpenseParticipant; basisPoints / shareUnits / exactAmountPaise
+///           ExpenseParticipant; basisPoints / shareUnits / exactAmountMinor
 ///           are all NULL for these rows.
 ///
-/// EXACT   — Each participant's share is specified by the client in paise.
-///           The service validates SUM(exactAmountPaise) = amountPaise before
-///           writing. sharePaise equals exactAmountPaise for every row;
+/// EXACT   — Each participant's share is specified by the client in minor units.
+///           The service validates SUM(exactAmountMinor) = amountMinor before
+///           writing. shareMinor equals exactAmountMinor for every row;
 ///           no rounding is involved.
 ///
 /// PERCENT — Each participant's share is expressed as a percentage in basis
 ///           points (1 bp = 0.01%). The service validates
 ///           SUM(basisPoints) = 10 000 and applies the Largest Remainder
-///           Method to distribute any paise remainder without losing or
-///           gaining a single paise.
+///           Method to distribute any minor-unit remainder without losing or
+///           gaining a single unit.
 ///
 /// SHARES  — Each participant is assigned a positive integer unit count.
-///           sharePaise = floor(shareUnits / totalShareUnits * amountPaise)
+///           shareMinor = floor(shareUnits / totalShareUnits * amountMinor)
 ///           with the Largest Remainder Method for the remainder. Useful for
 ///           "I ate twice as much" style splits.
 enum ExpenseSplitType {
@@ -141,7 +142,7 @@ model User {
   refreshTokens          RefreshToken[]
   ownedTrips             Trip[]               @relation("TripCreator")
   memberships            TripMember[]
-  expensesPaid           Expense[]            @relation("ExpensePayer")
+  expensePayments        ExpensePayment[]
   expensesCreated        Expense[]            @relation("ExpenseCreator")
   expenseParticipations  ExpenseParticipant[]
   settlementsFrom        Settlement[]         @relation("SettlementFrom")
@@ -238,18 +239,19 @@ model Expense {
   tripId      String           @db.Uuid
   title       String
   /// ── CANONICAL ACCOUNTING FIELD ────────────────────────────────────────────
-  /// Total amount in paise. Always a positive integer. Never a Float or
-  /// Decimal. The Flutter client sends and receives integers; SUM aggregates
-  /// must round-trip exactly. This is the amount against which
-  /// SUM(ExpenseParticipant.sharePaise) must equal for every expense.
-  amountPaise Int
+  /// Total amount in minor units (the smallest indivisible unit of the
+  /// currency: cents for USD, paise for INR, yen for JPY). Always a positive
+  /// integer. Never a Float or Decimal. The Flutter client sends and receives
+  /// integers; SUM aggregates must round-trip exactly. This is the amount
+  /// against which SUM(ExpenseParticipant.shareMinor) must equal for every
+  /// expense.
+  amountMinor Int
   category    ExpenseCategory  @default(MISC)
   /// The strategy used to compute participant shares at creation time.
   /// After the expense is written this field is informational only —
   /// the balance engine never branches on it. See the ExpenseSplitType
   /// enum documentation for the contract each value implies.
   splitType   ExpenseSplitType @default(EQUAL)
-  paidById    String           @db.Uuid
   createdById String           @db.Uuid
   /// User-supplied date for the expense (the receipt date), distinct from createdAt.
   spentAt     DateTime
@@ -257,16 +259,16 @@ model Expense {
   /// ── AUDIT METADATA ────────────────────────────────────────────────────────
   /// Immutable snapshot of the raw split intent as supplied by the client
   /// at creation time. NULL for historical EQUAL expenses (their split is
-  /// fully reconstructible from amountPaise and participant count).
+  /// fully reconstructible from amountMinor and participant count).
   ///
   /// This field is NEVER read by the balance engine or any accounting code.
   /// It exists solely to allow the UI and support tooling to display or
   /// verify the original user intent without reverse-engineering it from
-  /// the computed sharePaise values.
+  /// the computed shareMinor values.
   ///
   /// Shape by split type:
   ///   EQUAL   → null
-  ///   EXACT   → { "participants": { "<userId>": <exactPaise: number> } }
+  ///   EXACT   → { "participants": { "<userId>": <exactAmountMinor: number> } }
   ///   PERCENT → { "participants": { "<userId>": <basisPoints: number> } }
   ///   SHARES  → { "participants": { "<userId>": <shareUnits: number> } }
   ///
@@ -279,30 +281,29 @@ model Expense {
   deletedAt DateTime?
 
   trip         Trip                 @relation(fields: [tripId], references: [id], onDelete: Cascade)
-  paidBy       User                 @relation("ExpensePayer", fields: [paidById], references: [id], onDelete: Restrict)
   createdBy    User                 @relation("ExpenseCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  payments     ExpensePayment[]
   participants ExpenseParticipant[]
 
   @@index([tripId, spentAt(sort: Desc)])
-  @@index([paidById])
   @@index([deletedAt])
   @@map("expenses")
 }
 
 /// One row per (expense, participant). Records both the canonical accounting
-/// value (sharePaise) and optional split-strategy metadata for display/audit.
+/// value (shareMinor) and optional split-strategy metadata for display/audit.
 ///
 /// ── ACCOUNTING INVARIANT ──────────────────────────────────────────────────
-/// SUM(sharePaise) across all rows for a given expenseId MUST equal
-/// Expense.amountPaise. This invariant is enforced by the service layer at
-/// write time and asserted by the balance engine at read time. No paise may
-/// be created or destroyed across the life of an expense.
+/// SUM(shareMinor) across all rows for a given expenseId MUST equal
+/// Expense.amountMinor. This invariant is enforced by the service layer at
+/// write time and asserted by the balance engine at read time. No minor unit
+/// may be created or destroyed across the life of an expense.
 ///
 /// ── FIELD RESPONSIBILITIES ───────────────────────────────────────────────
 ///
-/// sharePaise (CANONICAL, mandatory)
+/// shareMinor (CANONICAL, mandatory)
 ///   The final, computed integer amount this participant owes for this
-///   expense, in paise. This is the ONLY field the balance engine reads.
+///   expense, in minor units. This is the ONLY field the balance engine reads.
 ///   It is set at creation and never modified (expenses are immutable).
 ///   Correct for every split type — the split type only affects HOW this
 ///   value was computed before being written.
@@ -318,25 +319,25 @@ model Expense {
 ///   The raw ratio unit for this participant (e.g., if split is 3:5:7, this
 ///   holds 3, 5, or 7). Range: 1–1 000 000. NULL for all other split types.
 ///
-/// exactAmountPaise (AUDIT, nullable — EXACT splits only)
-///   The client-specified exact amount in paise. Range: ≥ 0. For EXACT
-///   splits, sharePaise equals this value (no rounding). NULL for all other
+/// exactAmountMinor (AUDIT, nullable — EXACT splits only)
+///   The client-specified exact amount in minor units. Range: ≥ 0. For EXACT
+///   splits, shareMinor equals this value (no rounding). NULL for all other
 ///   split types.
 ///
 /// ── HISTORICAL ROWS ──────────────────────────────────────────────────────
 /// All rows created before this migration have basisPoints = NULL,
-/// shareUnits = NULL, and exactAmountPaise = NULL. This is correct:
-/// EQUAL expenses carry no metadata beyond amountPaise and participant count.
+/// shareUnits = NULL, and exactAmountMinor = NULL. This is correct:
+/// EQUAL expenses carry no metadata beyond amountMinor and participant count.
 model ExpenseParticipant {
   id        String @id @default(uuid()) @db.Uuid
   expenseId String @db.Uuid
   userId    String @db.Uuid
 
   /// ── CANONICAL ACCOUNTING FIELD — read by the balance engine ──────────────
-  /// The final computed integer share this participant owes, in paise.
-  /// SUM(sharePaise) across all participants for one expense = amountPaise.
+  /// The final computed integer share this participant owes, in minor units.
+  /// SUM(shareMinor) across all participants for one expense = amountMinor.
   /// Immutable after creation. Never null.
-  sharePaise Int
+  shareMinor Int
 
   /// ── SUPPLEMENTARY AUDIT FIELDS — never read by the balance engine ─────────
   /// At most one of these three columns will be non-NULL for any given row.
@@ -352,10 +353,10 @@ model ExpenseParticipant {
   /// DB range constraint: [1, 1 000 000].
   shareUnits Int?
 
-  /// EXACT split only. Client-specified exact amount in paise.
-  /// For EXACT splits, sharePaise == exactAmountPaise (no rounding).
+  /// EXACT split only. Client-specified exact amount in minor units.
+  /// For EXACT splits, shareMinor == exactAmountMinor (no rounding).
   /// DB range constraint: ≥ 0.
-  exactAmountPaise Int?
+  exactAmountMinor Int?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -366,6 +367,73 @@ model ExpenseParticipant {
   @@unique([expenseId, userId])
   @@index([userId])
   @@map("expense_participants")
+}
+
+/// One row per payer per expense — the PAYMENT dimension of expense accounting.
+///
+/// ── TWO-DIMENSION ACCOUNTING MODEL ───────────────────────────────────────────
+///
+/// Every expense has two independent accounting dimensions:
+///
+///   PAYMENT (this table)     — who contributed money and how much.
+///   OBLIGATION (ExpenseParticipant) — who owes money and how much.
+///
+/// Both dimensions must independently satisfy the same invariant:
+///   SUM(contributionMinor) over payments for one expense = Expense.amountMinor
+///   SUM(shareMinor) over participants for one expense    = Expense.amountMinor
+///
+/// These invariants are enforced by the service at write time and asserted by
+/// the balance engine at read time. No minor unit may be created or destroyed.
+///
+/// ── PAYMENT DIM: FIELD RESPONSIBILITIES ──────────────────────────────────────
+///
+/// contributionMinor (CANONICAL, mandatory, > 0)
+///   The integer amount this payer contributed toward this expense, in minor
+///   units. Must be positive (DB-level check constraint). Written once at
+///   creation; never modified (expenses are immutable).
+///
+/// paymentMeta (AUDIT, nullable)
+///   Optional immutable snapshot for audit and display purposes only.
+///   Intended shape (reserved for Phase 3+):
+///     { method: "UPI" | "CASH" | …, ref: string | null }
+///   Never read by the balance engine. NULL is the current default.
+///
+/// ── CURRENT USAGE (Phase 2 — single-payer API) ───────────────────────────────
+/// The create-expense API still accepts a single `paidByUserId`. The service
+/// maps that to exactly one row here with contributionMinor = amountMinor.
+/// Multi-payer creation will be unlocked in Phase 3 (payment editor UX).
+///
+/// ── CASCADE BEHAVIOUR ────────────────────────────────────────────────────────
+/// onDelete: Cascade from Expense — deleting (soft or hard) the parent expense
+/// removes all its payment rows. The accounting invariant cannot be violated
+/// by a partial delete because payments have no independent existence.
+model ExpensePayment {
+  id                String @id @default(uuid()) @db.Uuid
+  expenseId         String @db.Uuid
+  userId            String @db.Uuid
+
+  /// ── CANONICAL ACCOUNTING FIELD ────────────────────────────────────────────
+  /// Amount this payer contributed toward this expense, in minor units.
+  /// Must be a positive integer. DB check constraint enforces > 0.
+  /// SUM(contributionMinor) across all rows for a given expenseId MUST equal
+  /// Expense.amountMinor.
+  contributionMinor Int
+
+  /// ── AUDIT METADATA (optional) ─────────────────────────────────────────────
+  /// Immutable snapshot of payment method / reference for audit and display.
+  /// Reserved for future use; NULL is the default until Phase 3.
+  paymentMeta Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([expenseId, userId])
+  @@index([expenseId])
+  @@index([userId])
+  @@map("expense_payments")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -381,7 +449,7 @@ model Settlement {
   tripId      String           @db.Uuid
   fromUserId  String           @db.Uuid
   toUserId    String           @db.Uuid
-  amountPaise Int
+  amountMinor Int
   status      SettlementStatus @default(COMPLETED)
   method      SettlementMethod @default(UPI)
   note        String?

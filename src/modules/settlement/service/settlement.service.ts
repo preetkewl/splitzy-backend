@@ -33,8 +33,8 @@ export class SettlementService {
     if (input.fromUserId === input.toUserId) {
       throw ApiError.badRequest('fromUserId and toUserId must differ');
     }
-    if (input.amountPaise <= 0) {
-      throw ApiError.badRequest('amountPaise must be positive');
+    if (input.amountMinor <= 0) {
+      throw ApiError.badRequest('amountMinor must be positive');
     }
 
     // Caller must be a trip member.
@@ -56,7 +56,7 @@ export class SettlementService {
       tripId: input.tripId,
       fromUserId: input.fromUserId,
       toUserId: input.toUserId,
-      amountPaise: input.amountPaise,
+      amountMinor: input.amountMinor,
       method: input.method ?? SettlementMethod.UPI,
       note: input.note ?? null,
       externalRef: input.externalRef ?? null,
@@ -69,7 +69,7 @@ export class SettlementService {
         tripId: input.tripId,
         fromUserId: input.fromUserId,
         toUserId: input.toUserId,
-        amountPaise: input.amountPaise,
+        amountMinor: input.amountMinor,
         method: created.method,
       },
       'settlement recorded',

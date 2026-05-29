@@ -44,7 +44,7 @@ export function toTripSummary(row: TripListRow, viewerUserId: string): TripSumma
     isOwner: row.createdById === viewerUserId,
     memberCount: row.members.length,
     members: row.members.map(toMemberPreview),
-    totalAmountPaise: row.totalAmountPaise,
+    totalAmountMinor: row.totalAmountMinor,
     latestExpenseAt: row.latestExpenseAt === null ? null : row.latestExpenseAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -57,9 +57,9 @@ export function toTripSummary(row: TripListRow, viewerUserId: string): TripSumma
  */
 export function toTripDetail(row: TripDetailRow, viewerUserId: string): TripDetailDto {
   const balanceSummary: TripBalanceSummaryDto = {
-    totalAmountPaise: row.totalAmountPaise,
-    settledAmountPaise: 0,
-    pendingAmountPaise: row.totalAmountPaise,
+    totalAmountMinor: row.totalAmountMinor,
+    settledAmountMinor: 0,
+    pendingAmountMinor: row.totalAmountMinor,
   };
   return {
     id: row.id,
@@ -70,7 +70,7 @@ export function toTripDetail(row: TripDetailRow, viewerUserId: string): TripDeta
     isOwner: row.createdById === viewerUserId,
     memberCount: row.members.length,
     members: row.members.map(toMember),
-    totalAmountPaise: row.totalAmountPaise,
+    totalAmountMinor: row.totalAmountMinor,
     latestExpenseAt: row.latestExpenseAt === null ? null : row.latestExpenseAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

@@ -20,7 +20,7 @@ export interface UserPreviewDto {
 export interface SettlementDto {
   id: string;
   tripId: string;
-  amountPaise: number;
+  amountMinor: number;
   status: SettlementStatus;
   method: SettlementMethod;
   note: string | null;
@@ -39,7 +39,7 @@ export interface CreateSettlementInput {
   tripId: string;
   fromUserId: string;
   toUserId: string;
-  amountPaise: number;
+  amountMinor: number;
   method?: SettlementMethod;
   note?: string | null;
   externalRef?: string | null;

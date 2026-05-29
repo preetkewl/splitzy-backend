@@ -7,8 +7,8 @@
  *   - simplify:             greedy minimum-transfer debt simplification
  *
  * Invariants enforced by tests:
- *   1. SUM(sharePaise) === amountPaise        (no paise loss in a split)
- *   2. SUM(netBalance.netPaise) === 0         (no paise loss in aggregation)
+ *   1. SUM(shareMinor) === amountMinor        (no minor unit loss in a split)
+ *   2. SUM(netBalance.netMinor) === 0         (no minor unit loss in aggregation)
  *   3. simplify(b)                            produces ≤ |creditors| + |debtors| − 1 transfers
  *   4. simplify(b)                            is deterministic for the same input
  *
@@ -24,28 +24,28 @@
 
 export interface ParticipantShare {
   userId: string;
-  sharePaise: number;
+  shareMinor: number;
 }
 
 export interface ExpenseInput {
   /** Whichever user laid out the cash. Must appear in `participants`. */
   payerId: string;
-  /** Total amount in paise; positive integer. */
-  amountPaise: number;
-  /** Per-participant share. SUM(sharePaise) must equal amountPaise. */
+  /** Total amount in minor units; positive integer. */
+  amountMinor: number;
+  /** Per-participant share. SUM(shareMinor) must equal amountMinor. */
   participants: readonly ParticipantShare[];
 }
 
 export interface NetBalance {
   userId: string;
   /** > 0: this user is owed; < 0: this user owes; 0: settled. */
-  netPaise: number;
+  netMinor: number;
 }
 
 export interface SettlementTransfer {
   fromUserId: string;
   toUserId: string;
-  amountPaise: number;
+  amountMinor: number;
 }
 
 // ── Engine ───────────────────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ export interface SettlementTransfer {
 export const BalanceEngine = {
   /**
    * Equal-split shares for one expense. Payer absorbs floor-division
-   * remainder so SUM(shares) === amountPaise exactly.
+   * remainder so SUM(shares) === amountMinor exactly.
    *
    * Throws if input is malformed (non-positive amount, empty list, payer
    * missing from participants). Defensive — service-layer validation
@@ -61,12 +61,12 @@ export const BalanceEngine = {
    * for the math invariant.
    */
   splitEqual(
-    amountPaise: number,
+    amountMinor: number,
     participantIds: readonly string[],
     payerId: string,
   ): ParticipantShare[] {
-    if (!Number.isInteger(amountPaise) || amountPaise <= 0) {
-      throw new Error(`splitEqual: amountPaise must be a positive integer (got ${String(amountPaise)})`);
+    if (!Number.isInteger(amountMinor) || amountMinor <= 0) {
+      throw new Error(`splitEqual: amountMinor must be a positive integer (got ${String(amountMinor)})`);
     }
     if (participantIds.length === 0) {
       throw new Error('splitEqual: participantIds must not be empty');
@@ -75,11 +75,11 @@ export const BalanceEngine = {
       throw new Error('splitEqual: payerId must be one of the participants');
     }
     const n = participantIds.length;
-    const baseShare = Math.floor(amountPaise / n);
-    const payerShare = amountPaise - baseShare * (n - 1);
+    const baseShare = Math.floor(amountMinor / n);
+    const payerShare = amountMinor - baseShare * (n - 1);
     return participantIds.map((userId) => ({
       userId,
-      sharePaise: userId === payerId ? payerShare : baseShare,
+      shareMinor: userId === payerId ? payerShare : baseShare,
     }));
   },
 
@@ -110,46 +110,46 @@ export const BalanceEngine = {
     for (const id of memberIds) net.set(id, 0);
 
     for (const expense of expenses) {
-      net.set(expense.payerId, (net.get(expense.payerId) ?? 0) + expense.amountPaise);
+      net.set(expense.payerId, (net.get(expense.payerId) ?? 0) + expense.amountMinor);
       let shareSum = 0;
       for (const p of expense.participants) {
-        net.set(p.userId, (net.get(p.userId) ?? 0) - p.sharePaise);
-        shareSum += p.sharePaise;
+        net.set(p.userId, (net.get(p.userId) ?? 0) - p.shareMinor);
+        shareSum += p.shareMinor;
       }
       // Belt-and-braces: every persisted expense was created with shares
-      // that sum to amountPaise. If anyone hand-edits the DB and breaks
+      // that sum to amountMinor. If anyone hand-edits the DB and breaks
       // that, we want a loud failure here.
-      if (shareSum !== expense.amountPaise) {
+      if (shareSum !== expense.amountMinor) {
         throw new Error(
-          `computeNetBalances: participant shares (${String(shareSum)}) do not sum to amount (${String(expense.amountPaise)})`,
+          `computeNetBalances: participant shares (${String(shareSum)}) do not sum to amount (${String(expense.amountMinor)})`,
         );
       }
     }
 
     for (const s of completedSettlements) {
-      if (!Number.isInteger(s.amountPaise) || s.amountPaise <= 0) {
+      if (!Number.isInteger(s.amountMinor) || s.amountMinor <= 0) {
         throw new Error(
-          `computeNetBalances: settlement amountPaise must be a positive integer (got ${String(s.amountPaise)})`,
+          `computeNetBalances: settlement amountMinor must be a positive integer (got ${String(s.amountMinor)})`,
         );
       }
       if (s.fromUserId === s.toUserId) {
         throw new Error('computeNetBalances: settlement fromUserId must differ from toUserId');
       }
       // Payer's debt shrinks (net moves up); receiver's credit shrinks (net moves down).
-      net.set(s.fromUserId, (net.get(s.fromUserId) ?? 0) + s.amountPaise);
-      net.set(s.toUserId, (net.get(s.toUserId) ?? 0) - s.amountPaise);
+      net.set(s.fromUserId, (net.get(s.fromUserId) ?? 0) + s.amountMinor);
+      net.set(s.toUserId, (net.get(s.toUserId) ?? 0) - s.amountMinor);
     }
 
     const seen = new Set(memberIds);
     const result: NetBalance[] = memberIds.map((userId) => ({
       userId,
-      netPaise: net.get(userId) ?? 0,
+      netMinor: net.get(userId) ?? 0,
     }));
     const extras = Array.from(net.entries())
       .filter(([id]) => !seen.has(id))
       .sort(([a], [b]) => a.localeCompare(b));
-    for (const [userId, netPaise] of extras) {
-      result.push({ userId, netPaise });
+    for (const [userId, netMinor] of extras) {
+      result.push({ userId, netMinor });
     }
     return result;
   },
@@ -165,15 +165,15 @@ export const BalanceEngine = {
    */
   simplify(balances: readonly NetBalance[]): SettlementTransfer[] {
     const creditors = balances
-      .filter((b) => b.netPaise > 0)
-      .map((b) => ({ userId: b.userId, remaining: b.netPaise }))
+      .filter((b) => b.netMinor > 0)
+      .map((b) => ({ userId: b.userId, remaining: b.netMinor }))
       .sort((a, b) => {
         if (b.remaining !== a.remaining) return b.remaining - a.remaining;
         return a.userId.localeCompare(b.userId);
       });
     const debtors = balances
-      .filter((b) => b.netPaise < 0)
-      .map((b) => ({ userId: b.userId, remaining: -b.netPaise }))
+      .filter((b) => b.netMinor < 0)
+      .map((b) => ({ userId: b.userId, remaining: -b.netMinor }))
       .sort((a, b) => {
         if (b.remaining !== a.remaining) return b.remaining - a.remaining;
         return a.userId.localeCompare(b.userId);
@@ -191,7 +191,7 @@ export const BalanceEngine = {
         transfers.push({
           fromUserId: d.userId,
           toUserId: c.userId,
-          amountPaise: pay,
+          amountMinor: pay,
         });
       }
       d.remaining -= pay;

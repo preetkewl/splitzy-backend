@@ -56,7 +56,7 @@ async function buildApp(): Promise<TestApp> {
   const expenseRepo = new FakeExpenseRepository(store);
   // Step 6: settlement repo is a dependency of ExpenseService for balance
   // computation. The expense smoke test never creates settlements, so the
-  // fake's empty-list return keeps totalReimbursedPaise at 0.
+  // fake's empty-list return keeps totalReimbursedMinor at 0.
   const settlementRepo = new FakeSettlementRepository(store);
 
   const authService = new AuthService(userRepo, refreshRepo, tokens);
@@ -128,19 +128,19 @@ function authHeaders(token: string): Record<string, string> {
 
 interface ExpensePayload {
   title: string;
-  amountPaise: number;
+  amountMinor: number;
   payerKey: 'aarya' | 'aarav' | 'meera' | 'kabir';
   category: 'STAY' | 'FOOD' | 'TRAVEL' | 'FUN' | 'MISC';
   spentAt: string;
 }
 
 const SEED_EXPENSES: ExpensePayload[] = [
-  { title: 'Airbnb in Anjuna',   amountPaise: 1_240_000, payerKey: 'aarav', category: 'STAY',   spentAt: '2024-12-06T10:00:00.000Z' },
-  { title: 'Petrol — scooter',   amountPaise:    80_000, payerKey: 'aarya', category: 'TRAVEL', spentAt: '2024-12-06T10:00:00.000Z' },
-  { title: 'Dinner at Thalassa', amountPaise:   460_000, payerKey: 'meera', category: 'FOOD',   spentAt: '2024-12-06T10:00:00.000Z' },
-  { title: 'Beach shack lunch',  amountPaise:   184_000, payerKey: 'kabir', category: 'FOOD',   spentAt: '2024-12-07T10:00:00.000Z' },
-  { title: 'Dudhsagar cab',      amountPaise:   320_000, payerKey: 'aarya', category: 'TRAVEL', spentAt: '2024-12-07T10:00:00.000Z' },
-  { title: 'Club entry',         amountPaise:   240_000, payerKey: 'aarav', category: 'FUN',    spentAt: '2024-12-07T10:00:00.000Z' },
+  { title: 'Airbnb in Anjuna',   amountMinor: 1_240_000, payerKey: 'aarav', category: 'STAY',   spentAt: '2024-12-06T10:00:00.000Z' },
+  { title: 'Petrol — scooter',   amountMinor:    80_000, payerKey: 'aarya', category: 'TRAVEL', spentAt: '2024-12-06T10:00:00.000Z' },
+  { title: 'Dinner at Thalassa', amountMinor:   460_000, payerKey: 'meera', category: 'FOOD',   spentAt: '2024-12-06T10:00:00.000Z' },
+  { title: 'Beach shack lunch',  amountMinor:   184_000, payerKey: 'kabir', category: 'FOOD',   spentAt: '2024-12-07T10:00:00.000Z' },
+  { title: 'Dudhsagar cab',      amountMinor:   320_000, payerKey: 'aarya', category: 'TRAVEL', spentAt: '2024-12-07T10:00:00.000Z' },
+  { title: 'Club entry',         amountMinor:   240_000, payerKey: 'aarav', category: 'FUN',    spentAt: '2024-12-07T10:00:00.000Z' },
 ];
 
 async function main(): Promise<void> {
@@ -179,7 +179,7 @@ async function main(): Promise<void> {
       body: JSON.stringify({
         tripId,
         title: e.title,
-        amountPaise: e.amountPaise,
+        amountMinor: e.amountMinor,
         paidByUserId: userByKey[e.payerKey].userId,
         category: e.category,
         spentAt: e.spentAt,
@@ -187,15 +187,15 @@ async function main(): Promise<void> {
     });
     check(`POST ${e.title} -> 201`, res.status === 201, res.body);
     if (isSuccess<{
-      participants: { userId: string; sharePaise: number }[];
+      participants: { userId: string; shareMinor: number }[];
       paidBy: { userId: string };
-      amountPaise: number;
+      amountMinor: number;
     }>(res.body)) {
-      const sum = res.body.data.participants.reduce((s, p) => s + p.sharePaise, 0);
+      const sum = res.body.data.participants.reduce((s, p) => s + p.shareMinor, 0);
       check(
-        `${e.title}: SUM(shares) === amountPaise`,
-        sum === e.amountPaise,
-        { sum, amountPaise: e.amountPaise },
+        `${e.title}: SUM(shares) === amountMinor`,
+        sum === e.amountMinor,
+        { sum, amountMinor: e.amountMinor },
       );
     }
   }
@@ -246,28 +246,28 @@ async function main(): Promise<void> {
   });
   check('balances -> 200', balances.status === 200);
   type BalancesData = {
-    totalAmountPaise: number;
-    totalReimbursedPaise: number;
-    members: { userId: string; netPaise: number; totalPaidPaise: number; totalSharePaise: number }[];
-    suggestedTransfers: { fromUserId: string; toUserId: string; amountPaise: number }[];
+    totalAmountMinor: number;
+    totalReimbursedMinor: number;
+    members: { userId: string; netMinor: number; totalPaidMinor: number; totalShareMinor: number }[];
+    suggestedTransfers: { fromUserId: string; toUserId: string; amountMinor: number }[];
   };
   if (isSuccess<BalancesData>(balances.body)) {
     const b = balances.body.data;
-    check('totalAmountPaise = 25,24,000', b.totalAmountPaise === 2_524_000);
-    check('totalReimbursedPaise = 0 (no settlements yet)', b.totalReimbursedPaise === 0);
+    check('totalAmountMinor = 25,24,000', b.totalAmountMinor === 2_524_000);
+    check('totalReimbursedMinor = 0 (no settlements yet)', b.totalReimbursedMinor === 0);
     check('4 member balances', b.members.length === 4);
-    const sum = b.members.reduce((s, m) => s + m.netPaise, 0);
+    const sum = b.members.reduce((s, m) => s + m.netMinor, 0);
     check('SUM(net) === 0', sum === 0, b.members);
     const aarav_ = b.members.find((m) => m.userId === aarav.userId);
     const aarya_ = b.members.find((m) => m.userId === aarya.userId);
     const meera_ = b.members.find((m) => m.userId === meera.userId);
     const kabir_ = b.members.find((m) => m.userId === kabir.userId);
-    check('aarav net = +849000', aarav_?.netPaise === 849_000, aarav_);
-    check('aarya net = -231000', aarya_?.netPaise === -231_000, aarya_);
-    check('meera net = -171000', meera_?.netPaise === -171_000, meera_);
-    check('kabir net = -447000', kabir_?.netPaise === -447_000, kabir_);
-    check('aarav totalPaid = 1480000', aarav_?.totalPaidPaise === 1_480_000);
-    check('aarav totalShare = 631000', aarav_?.totalSharePaise === 631_000);
+    check('aarav net = +849000', aarav_?.netMinor === 849_000, aarav_);
+    check('aarya net = -231000', aarya_?.netMinor === -231_000, aarya_);
+    check('meera net = -171000', meera_?.netMinor === -171_000, meera_);
+    check('kabir net = -447000', kabir_?.netMinor === -447_000, kabir_);
+    check('aarav totalPaid = 1480000', aarav_?.totalPaidMinor === 1_480_000);
+    check('aarav totalShare = 631000', aarav_?.totalShareMinor === 631_000);
     check('every member is current', b.members.every((m) => 'isCurrentMember' in m));
     check('3 suggested transfers', b.suggestedTransfers.length === 3);
     check(
@@ -275,8 +275,8 @@ async function main(): Promise<void> {
       b.suggestedTransfers.every((t) => t.toUserId === aarav.userId),
     );
     check(
-      'transfers SUM === aarav.netPaise',
-      b.suggestedTransfers.reduce((s, t) => s + t.amountPaise, 0) === 849_000,
+      'transfers SUM === aarav.netMinor',
+      b.suggestedTransfers.reduce((s, t) => s + t.amountMinor, 0) === 849_000,
     );
   }
 
@@ -298,7 +298,7 @@ async function main(): Promise<void> {
     body: JSON.stringify({
       tripId,
       title: 'Mystery snack',
-      amountPaise: 1000,
+      amountMinor: 1000,
       paidByUserId: stranger.userId, // not a trip member
       spentAt: '2024-12-08T10:00:00.000Z',
     }),
@@ -311,7 +311,7 @@ async function main(): Promise<void> {
     body: JSON.stringify({
       tripId,
       title: 'Bad amount',
-      amountPaise: 12.5,
+      amountMinor: 12.5,
       paidByUserId: aarya.userId,
       spentAt: '2024-12-08T10:00:00.000Z',
     }),
@@ -324,7 +324,7 @@ async function main(): Promise<void> {
     body: JSON.stringify({
       tripId,
       title: 'Negative',
-      amountPaise: -10,
+      amountMinor: -10,
       paidByUserId: aarya.userId,
       spentAt: '2024-12-08T10:00:00.000Z',
     }),
@@ -337,7 +337,7 @@ async function main(): Promise<void> {
     body: JSON.stringify({
       tripId,
       title: 'Subset split',
-      amountPaise: 1000,
+      amountMinor: 1000,
       paidByUserId: aarya.userId,
       participantIds: [aarav.userId, meera.userId], // payer missing
       spentAt: '2024-12-08T10:00:00.000Z',
@@ -381,12 +381,12 @@ async function main(): Promise<void> {
   const balancesAfter = await app.fetchJson(`/api/v1/trips/${tripId}/balances`, {
     headers: authHeaders(aarya.token),
   });
-  if (isSuccess<{ totalAmountPaise: number; members: { netPaise: number }[] }>(balancesAfter.body)) {
+  if (isSuccess<{ totalAmountMinor: number; members: { netMinor: number }[] }>(balancesAfter.body)) {
     check(
-      'totalAmountPaise drops by 460000',
-      balancesAfter.body.data.totalAmountPaise === 2_524_000 - 460_000,
+      'totalAmountMinor drops by 460000',
+      balancesAfter.body.data.totalAmountMinor === 2_524_000 - 460_000,
     );
-    const sum = balancesAfter.body.data.members.reduce((s, m) => s + m.netPaise, 0);
+    const sum = balancesAfter.body.data.members.reduce((s, m) => s + m.netMinor, 0);
     check('SUM(net) === 0 still', sum === 0);
   }
 
@@ -419,7 +419,7 @@ async function main(): Promise<void> {
     body: JSON.stringify({
       tripId,
       title: 'Awkward chai bill',
-      amountPaise: 100, // 100/4 = 25 clean — try 101 instead
+      amountMinor: 100, // 100/4 = 25 clean — try 101 instead
       paidByUserId: aarya.userId,
       spentAt: '2024-12-08T10:00:00.000Z',
     }),
@@ -431,21 +431,21 @@ async function main(): Promise<void> {
     body: JSON.stringify({
       tripId,
       title: 'Remainder test',
-      amountPaise: 101, // 101/4 = 25 floor + 1 remainder
+      amountMinor: 101, // 101/4 = 25 floor + 1 remainder
       paidByUserId: aarya.userId,
       spentAt: '2024-12-08T10:00:00.000Z',
     }),
   });
   if (
-    isSuccess<{ participants: { userId: string; sharePaise: number }[]; paidBy: { userId: string } }>(
+    isSuccess<{ participants: { userId: string; shareMinor: number }[]; paidBy: { userId: string } }>(
       remainderRes.body,
     )
   ) {
     const data = remainderRes.body.data;
-    const sum = data.participants.reduce((s, p) => s + p.sharePaise, 0);
+    const sum = data.participants.reduce((s, p) => s + p.shareMinor, 0);
     check('remainder: SUM(shares) === 101', sum === 101);
-    const payerShare = data.participants.find((p) => p.userId === aarya.userId)?.sharePaise;
-    const otherShare = data.participants.find((p) => p.userId !== aarya.userId)?.sharePaise;
+    const payerShare = data.participants.find((p) => p.userId === aarya.userId)?.shareMinor;
+    const otherShare = data.participants.find((p) => p.userId !== aarya.userId)?.shareMinor;
     check('remainder: payer share = 26 (25 + 1)', payerShare === 26);
     check('remainder: non-payer share = 25', otherShare === 25);
   }

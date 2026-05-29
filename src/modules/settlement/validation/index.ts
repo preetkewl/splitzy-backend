@@ -3,17 +3,17 @@ import { z } from 'zod';
 import {
   MAX_EXTERNAL_REF_LENGTH,
   MAX_NOTE_LENGTH,
-  MAX_SETTLEMENT_AMOUNT_PAISE,
-  MIN_SETTLEMENT_AMOUNT_PAISE,
+  MAX_SETTLEMENT_AMOUNT_MINOR,
+  MIN_SETTLEMENT_AMOUNT_MINOR,
 } from '../constants.js';
 
 const uuid = z.string().uuid('Must be a valid UUID');
 
-const amountPaiseSchema = z
+const amountMinorSchema = z
   .number()
-  .int('amountPaise must be an integer (paise, not rupees)')
-  .min(MIN_SETTLEMENT_AMOUNT_PAISE)
-  .max(MAX_SETTLEMENT_AMOUNT_PAISE);
+  .int('amountMinor must be an integer (minor units, not whole currency)')
+  .min(MIN_SETTLEMENT_AMOUNT_MINOR)
+  .max(MAX_SETTLEMENT_AMOUNT_MINOR);
 
 const methodSchema = z.nativeEnum(SettlementMethod);
 
@@ -23,7 +23,7 @@ export const createSettlementBodySchema = z.object({
   tripId: uuid,
   fromUserId: uuid,
   toUserId: uuid,
-  amountPaise: amountPaiseSchema,
+  amountMinor: amountMinorSchema,
   method: methodSchema.optional(),
   note: z.string().max(MAX_NOTE_LENGTH).nullable().optional(),
   externalRef: z.string().max(MAX_EXTERNAL_REF_LENGTH).nullable().optional(),

@@ -125,7 +125,7 @@ const SPENT_AT = '2026-05-26T13:00:00+05:30';
 const baseFields = {
   tripId: TRIP_ID,
   title: 'Test expense',
-  amountPaise: 100_000,
+  amountMinor: 100_000,
   paidByUserId: PAYER_ID,
   category: ExpenseCategory.FOOD,
   spentAt: SPENT_AT,
@@ -195,11 +195,11 @@ heading('EQUAL — request validation');
   );
   check('path is title', 'title' in noTitle.fields || '_' in noTitle.fields, noTitle.fields);
 
-  // 1g. Non-integer amountPaise
-  const floatAmount = expectZodError('decimal amountPaise → ZodError', () =>
-    createExpenseBodySchema.parse({ ...baseFields, amountPaise: 1000.5 }),
+  // 1g. Non-integer amountMinor
+  const floatAmount = expectZodError('decimal amountMinor → ZodError', () =>
+    createExpenseBodySchema.parse({ ...baseFields, amountMinor: 1000.5 }),
   );
-  check('path is amountPaise', 'amountPaise' in floatAmount.fields, floatAmount.fields);
+  check('path is amountMinor', 'amountMinor' in floatAmount.fields, floatAmount.fields);
 
   // 1h. spentAt as ISO string → transformed to Date
   const parsed = createExpenseBodySchema.safeParse({ ...baseFields, splitType: 'EQUAL' });
@@ -220,39 +220,39 @@ heading('EXACT — request validation');
 
 {
   const participants = [
-    { userId: USER_A, exactAmountPaise: 60_000 },
-    { userId: USER_B, exactAmountPaise: 40_000 },
+    { userId: USER_A, exactAmountMinor: 60_000 },
+    { userId: USER_B, exactAmountMinor: 40_000 },
   ];
 
   // 2a. Valid EXACT
-  const result = expectValid('valid EXACT — sum matches amountPaise', () =>
+  const result = expectValid('valid EXACT — sum matches amountMinor', () =>
     createExpenseBodySchema.parse({ ...baseFields, splitType: 'EXACT', participants }),
   );
   check('splitType EXACT', result?.splitType === ExpenseSplitType.EXACT);
   check('participants preserved', result !== undefined && 'participants' in result);
 
-  // 2b. Sum mismatch: total < amountPaise
+  // 2b. Sum mismatch: total < amountMinor
   const lowSum = expectZodError('EXACT sum too low → ZodError', () =>
     createExpenseBodySchema.parse({
       ...baseFields,
       splitType: 'EXACT',
       participants: [
-        { userId: USER_A, exactAmountPaise: 50_000 },
-        { userId: USER_B, exactAmountPaise: 40_000 }, // sum = 90 000, not 100 000
+        { userId: USER_A, exactAmountMinor: 50_000 },
+        { userId: USER_B, exactAmountMinor: 40_000 }, // sum = 90 000, not 100 000
       ],
     }),
   );
   check('path is participants', 'participants' in lowSum.fields, lowSum.fields);
-  check('message mentions paise diff', lowSum.fields['participants']?.includes('difference') ?? false, lowSum.fields);
+  check('message mentions minor units diff', lowSum.fields['participants']?.includes('difference') ?? false, lowSum.fields);
 
-  // 2c. Sum mismatch: total > amountPaise
+  // 2c. Sum mismatch: total > amountMinor
   const highSum = expectZodError('EXACT sum too high → ZodError', () =>
     createExpenseBodySchema.parse({
       ...baseFields,
       splitType: 'EXACT',
       participants: [
-        { userId: USER_A, exactAmountPaise: 70_000 },
-        { userId: USER_B, exactAmountPaise: 40_000 }, // sum = 110 000
+        { userId: USER_A, exactAmountMinor: 70_000 },
+        { userId: USER_B, exactAmountMinor: 40_000 }, // sum = 110 000
       ],
     }),
   );
@@ -264,36 +264,36 @@ heading('EXACT — request validation');
       ...baseFields,
       splitType: 'EXACT',
       participants: [
-        { userId: USER_A, exactAmountPaise: 50_000 },
-        { userId: USER_A, exactAmountPaise: 50_000 }, // duplicate
+        { userId: USER_A, exactAmountMinor: 50_000 },
+        { userId: USER_A, exactAmountMinor: 50_000 }, // duplicate
       ],
     }),
   );
   check('path is participants.1.userId', 'participants.1.userId' in dupErr.fields, dupErr.fields);
   check('message mentions Duplicate', dupErr.fields['participants.1.userId']?.includes('Duplicate') ?? false, dupErr.fields);
 
-  // 2e. Negative exactAmountPaise
-  const negErr = expectZodError('negative exactAmountPaise → ZodError', () =>
+  // 2e. Negative exactAmountMinor
+  const negErr = expectZodError('negative exactAmountMinor → ZodError', () =>
     createExpenseBodySchema.parse({
       ...baseFields,
       splitType: 'EXACT',
       participants: [
-        { userId: USER_A, exactAmountPaise: -1 },
-        { userId: USER_B, exactAmountPaise: 101_000 },
+        { userId: USER_A, exactAmountMinor: -1 },
+        { userId: USER_B, exactAmountMinor: 101_000 },
       ],
     }),
   );
-  check('path is participants.0.exactAmountPaise', 'participants.0.exactAmountPaise' in negErr.fields, negErr.fields);
+  check('path is participants.0.exactAmountMinor', 'participants.0.exactAmountMinor' in negErr.fields, negErr.fields);
 
-  // 2f. Missing exactAmountPaise field
-  const missingField = expectZodError('missing exactAmountPaise → ZodError', () =>
+  // 2f. Missing exactAmountMinor field
+  const missingField = expectZodError('missing exactAmountMinor → ZodError', () =>
     createExpenseBodySchema.parse({
       ...baseFields,
       splitType: 'EXACT',
-      participants: [{ userId: USER_A }], // no exactAmountPaise
+      participants: [{ userId: USER_A }], // no exactAmountMinor
     }),
   );
-  check('path contains exactAmountPaise', Object.keys(missingField.fields).some((k) => k.includes('exactAmountPaise')), missingField.fields);
+  check('path contains exactAmountMinor', Object.keys(missingField.fields).some((k) => k.includes('exactAmountMinor')), missingField.fields);
 
   // 2g. Empty participants array
   const emptyErr = expectZodError('empty participants → ZodError', () =>
@@ -301,14 +301,14 @@ heading('EXACT — request validation');
   );
   check('path is participants', 'participants' in emptyErr.fields, emptyErr.fields);
 
-  // 2h. Payer with exactAmountPaise = 0 is valid (covers others entirely)
-  const payerZero = expectValid('payer exactAmountPaise = 0 is valid', () =>
+  // 2h. Payer with exactAmountMinor = 0 is valid (covers others entirely)
+  const payerZero = expectValid('payer exactAmountMinor = 0 is valid', () =>
     createExpenseBodySchema.parse({
       ...baseFields,
       splitType: 'EXACT',
       participants: [
-        { userId: PAYER_ID, exactAmountPaise: 0 },
-        { userId: USER_A, exactAmountPaise: 100_000 },
+        { userId: PAYER_ID, exactAmountMinor: 0 },
+        { userId: USER_A, exactAmountMinor: 100_000 },
       ],
     }),
   );
@@ -570,7 +570,7 @@ heading('Backward compatibility');
   const noCategory = createExpenseBodySchema.safeParse({
     tripId: TRIP_ID,
     title: 'No category',
-    amountPaise: 50_000,
+    amountMinor: 50_000,
     paidByUserId: PAYER_ID,
     spentAt: SPENT_AT,
     // no category, no splitType
@@ -593,8 +593,8 @@ heading('Zod error path structure (matches error-handler fields map)');
       ...baseFields,
       splitType: 'EXACT',
       participants: [
-        { userId: USER_A, exactAmountPaise: 50_000 },
-        { userId: USER_B, exactAmountPaise: 45_000 }, // sum = 95000 ≠ 100000
+        { userId: USER_A, exactAmountMinor: 50_000 },
+        { userId: USER_B, exactAmountMinor: 45_000 }, // sum = 95000 ≠ 100000
       ],
     }),
   );
@@ -633,8 +633,8 @@ heading('Zod error path structure (matches error-handler fields map)');
       ...baseFields,
       splitType: 'EXACT',
       participants: [
-        { userId: USER_A, exactAmountPaise: 50_000 },
-        { userId: USER_A, exactAmountPaise: 50_000 },
+        { userId: USER_A, exactAmountMinor: 50_000 },
+        { userId: USER_A, exactAmountMinor: 50_000 },
       ],
     }),
   );
@@ -716,17 +716,17 @@ heading('Response DTO shape (TypeScript type assertions)');
     id: 'e1-uuid',
     tripId: TRIP_ID,
     title: 'Team lunch',
-    amountPaise: 120_000,
+    amountMinor: 120_000,
     category: ExpenseCategory.FOOD,
     splitType: ExpenseSplitType.EQUAL,
     paidBy: userPreview,
     participants: [
       {
         ...userPreview,
-        sharePaise: 40_000,
+        shareMinor: 40_000,
         basisPoints: null,
         shareUnits: null,
-        exactAmountPaise: null,
+        exactAmountMinor: null,
       },
     ],
     splitMeta: null, // EQUAL → null
@@ -743,8 +743,8 @@ heading('Response DTO shape (TypeScript type assertions)');
     ...equalExpense,
     splitType: ExpenseSplitType.PERCENT,
     participants: [
-      { ...userPreview, sharePaise: 60_000, basisPoints: 5000, shareUnits: null, exactAmountPaise: null },
-      { ...userPreview, userId: USER_B, name: 'Rohan', sharePaise: 60_000, basisPoints: 5000, shareUnits: null, exactAmountPaise: null },
+      { ...userPreview, shareMinor: 60_000, basisPoints: 5000, shareUnits: null, exactAmountMinor: null },
+      { ...userPreview, userId: USER_B, name: 'Rohan', shareMinor: 60_000, basisPoints: 5000, shareUnits: null, exactAmountMinor: null },
     ],
     splitMeta: percentMeta,
   };
@@ -755,25 +755,25 @@ heading('Response DTO shape (TypeScript type assertions)');
   // MemberBalanceDto
   const memberBalance: MemberBalanceDto = {
     ...userPreview,
-    netPaise: 80_000,
-    totalPaidPaise: 200_000,
-    totalSharePaise: 120_000,
+    netMinor: 80_000,
+    totalPaidMinor: 200_000,
+    totalShareMinor: 120_000,
     isCurrentMember: true,
   };
-  check('MemberBalanceDto constructs correctly', memberBalance.netPaise === 80_000);
+  check('MemberBalanceDto constructs correctly', memberBalance.netMinor === 80_000);
 
   // SettlementSuggestionDto
   const suggestion: SettlementSuggestionDto = {
     fromUserId: USER_B,
     toUserId: USER_A,
-    amountPaise: 80_000,
+    amountMinor: 80_000,
   };
-  check('SettlementSuggestionDto constructs correctly', suggestion.amountPaise === 80_000);
+  check('SettlementSuggestionDto constructs correctly', suggestion.amountMinor === 80_000);
 
   // BalanceSummaryDto
   const balanceSummary: BalanceSummaryDto = {
-    totalAmountPaise: 300_000,
-    totalReimbursedPaise: 0,
+    totalAmountMinor: 300_000,
+    totalReimbursedMinor: 0,
     members: [memberBalance],
     suggestedTransfers: [suggestion],
   };
@@ -810,7 +810,7 @@ heading('API envelope shape');
       details: {
         fields: {
           'participants.1.userId': ['Duplicate userId: "abc" appears more than once'],
-          participants: ['EXACT: exactAmountPaise values sum to 90000 paise but amountPaise is 100000 paise (difference: -10000 paise).'],
+          participants: ['EXACT: exactAmountMinor values sum to 90000 minor units but amountMinor is 100000 minor units (difference: -10000 minor units).'],
         },
       },
     },
@@ -852,7 +852,7 @@ heading('Branch schemas (isolated parsing)');
   const ex = exactBodySchema.safeParse({
     ...baseFields,
     splitType: 'EXACT',
-    participants: [{ userId: USER_A, exactAmountPaise: 100_000 }],
+    participants: [{ userId: USER_A, exactAmountMinor: 100_000 }],
   });
   check('exactBodySchema parses EXACT (no sum check in branch)', ex.success);
   // Note: sum check is on the full discriminated union, not the branch alone.

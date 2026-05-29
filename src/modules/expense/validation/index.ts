@@ -12,12 +12,12 @@
  *     • field presence and types
  *     • per-field ranges (basisPoints ∈ [1,10000], shareUnits ∈ [1,1000000])
  *     • participant array uniqueness by userId          ← enforced here
- *     • EXACT cross-field sum (SUM(exactAmountPaise) == amountPaise)  ← enforced here
+ *     • EXACT cross-field sum (SUM(exactAmountMinor) == amountMinor)  ← enforced here
  *     • PERCENT cross-field sum (SUM(basisPoints) == 10000)           ← enforced here
  *   ExpenseService:
  *     • trip membership, payer-in-participants, feature flag
  *   SplitCalculator:
- *     • final invariant SUM(sharePaise) === amountPaise before DB write
+ *     • final invariant SUM(shareMinor) === amountMinor before DB write
  *
  * Cross-participant uniqueness is enforced on each participant array field via
  * .superRefine(). This keeps the branch schema as ZodObject (required by
@@ -34,9 +34,9 @@
 import { ExpenseCategory, ExpenseSplitType } from '@prisma/client';
 import { z } from 'zod';
 import {
-  MAX_EXPENSE_AMOUNT_PAISE,
+  MAX_EXPENSE_AMOUNT_MINOR,
   MAX_EXPENSE_TITLE_LENGTH,
-  MIN_EXPENSE_AMOUNT_PAISE,
+  MIN_EXPENSE_AMOUNT_MINOR,
   MIN_EXPENSE_TITLE_LENGTH,
 } from '../constants.js';
 
@@ -44,11 +44,11 @@ import {
 
 const uuid = z.string().uuid('Must be a valid UUID');
 
-const amountPaiseSchema = z
+const amountMinorSchema = z
   .number()
-  .int('amountPaise must be an integer (paise, not rupees)')
-  .min(MIN_EXPENSE_AMOUNT_PAISE, `amountPaise must be at least ${String(MIN_EXPENSE_AMOUNT_PAISE)}`)
-  .max(MAX_EXPENSE_AMOUNT_PAISE, `amountPaise must be at most ${String(MAX_EXPENSE_AMOUNT_PAISE)}`);
+  .int('amountMinor must be an integer (minor units, not whole currency)')
+  .min(MIN_EXPENSE_AMOUNT_MINOR, `amountMinor must be at least ${String(MIN_EXPENSE_AMOUNT_MINOR)}`)
+  .max(MAX_EXPENSE_AMOUNT_MINOR, `amountMinor must be at most ${String(MAX_EXPENSE_AMOUNT_MINOR)}`);
 
 const titleSchema = z
   .string()
@@ -115,15 +115,15 @@ function uniqueStringArray(ids: string[], ctx: z.RefinementCtx): void {
 // ── Per-participant schemas for non-EQUAL split types ─────────────────────────
 
 /**
- * EXACT: each participant specifies their exact paise amount (≥ 0).
+ * EXACT: each participant specifies their exact minor unit amount (≥ 0).
  * 0 is valid — a payer may cover someone entirely.
  */
 const exactParticipantSchema = z.object({
   userId: uuid,
-  exactAmountPaise: z
+  exactAmountMinor: z
     .number()
-    .int('exactAmountPaise must be an integer')
-    .min(0, 'exactAmountPaise cannot be negative'),
+    .int('exactAmountMinor must be an integer')
+    .min(0, 'exactAmountMinor cannot be negative'),
 });
 
 /**
@@ -164,7 +164,7 @@ const sharesParticipantSchema = z.object({
 const baseExpenseFields = {
   tripId: uuid,
   title: titleSchema,
-  amountPaise: amountPaiseSchema,
+  amountMinor: amountMinorSchema,
   paidByUserId: uuid,
   category: categorySchema.optional(),
   spentAt: spentAtSchema,
@@ -199,10 +199,10 @@ const exactBodySchema = baseExpenseSchema.extend({
   splitType: z.literal(ExpenseSplitType.EXACT),
   /**
    * One entry per participant.
-   * • exactAmountPaise ≥ 0 per participant (0 valid for payer covering everyone).
+   * • exactAmountMinor ≥ 0 per participant (0 valid for payer covering everyone).
    * • userIds must be unique within this array.
-   * • SUM(exactAmountPaise) must equal amountPaise — validated below on the
-   *   discriminated union output, where amountPaise is in scope.
+   * • SUM(exactAmountMinor) must equal amountMinor — validated below on the
+   *   discriminated union output, where amountMinor is in scope.
    */
   participants: z
     .array(exactParticipantSchema)
@@ -285,20 +285,20 @@ export const createExpenseBodySchema = z.preprocess(
     ])
     .superRefine((body, ctx) => {
       // ── EXACT: cross-field sum check ────────────────────────────────────────
-      // SUM(exactAmountPaise) must equal amountPaise exactly.
+      // SUM(exactAmountMinor) must equal amountMinor exactly.
       // We check here (not inside the calculator) so the error carries a
       // structured Zod path ("participants") and a human-readable diff message,
       // rather than being caught later as a generic 400.
       if (body.splitType === ExpenseSplitType.EXACT) {
-        const sum = body.participants.reduce((acc, p) => acc + p.exactAmountPaise, 0);
-        if (sum !== body.amountPaise) {
+        const sum = body.participants.reduce((acc, p) => acc + p.exactAmountMinor, 0);
+        if (sum !== body.amountMinor) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
             path: ['participants'],
             message:
-              `EXACT: exactAmountPaise values sum to ${String(sum)} paise ` +
-              `but amountPaise is ${String(body.amountPaise)} paise ` +
-              `(difference: ${String(sum - body.amountPaise)} paise).`,
+              `EXACT: exactAmountMinor values sum to ${String(sum)} minor units ` +
+              `but amountMinor is ${String(body.amountMinor)} minor units ` +
+              `(difference: ${String(sum - body.amountMinor)} minor units).`,
           });
         }
       }

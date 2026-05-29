@@ -32,7 +32,8 @@
     "smoke:friend": "tsx scripts/friend-smoke.ts",
     "smoke:settlement": "tsx scripts/settlement-smoke.ts",
     "smoke:all": "npm run smoke:http && npm run smoke:auth && npm run smoke:trip && npm run smoke:engine && npm run smoke:regression && npm run smoke:expense && npm run smoke:friend && npm run smoke:settlement",
-    "prepare": "husky || true"
+    "prepare": "husky || true",
+    "lint:no-paise": "! grep -rn --include='*.ts' '[Pp]aise' src scripts prisma/seed.ts 2>/dev/null || (echo 'ERROR: legacy paise terminology found — rename to minor units' && exit 1)"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",

@@ -13,12 +13,12 @@ export interface TripWithMembers extends Trip {
 
 /** A list row enriched with expense aggregates computed in a single groupBy. */
 export interface TripListRow extends TripWithMembers {
-  totalAmountPaise: number;
+  totalAmountMinor: number;
   latestExpenseAt: Date | null;
 }
 
 export interface TripDetailRow extends TripWithMembers {
-  totalAmountPaise: number;
+  totalAmountMinor: number;
   latestExpenseAt: Date | null;
 }
 
@@ -124,7 +124,7 @@ export class TripRepository implements ITripRepository {
       return created;
     });
 
-    return { ...trip, totalAmountPaise: 0, latestExpenseAt: null };
+    return { ...trip, totalAmountMinor: 0, latestExpenseAt: null };
   }
 
   // ── reads ──────────────────────────────────────────────────────────────────
@@ -141,12 +141,12 @@ export class TripRepository implements ITripRepository {
     if (trip === null) return null;
     const aggregate = await this.prisma.expense.aggregate({
       where: { tripId, deletedAt: null },
-      _sum: { amountPaise: true },
+      _sum: { amountMinor: true },
       _max: { spentAt: true },
     });
     return {
       ...trip,
-      totalAmountPaise: aggregate._sum.amountPaise ?? 0,
+      totalAmountMinor: aggregate._sum.amountMinor ?? 0,
       latestExpenseAt: aggregate._max.spentAt,
     };
   }
@@ -184,13 +184,13 @@ export class TripRepository implements ITripRepository {
     const aggregates = await this.prisma.expense.groupBy({
       by: ['tripId'],
       where: { tripId: { in: tripIds }, deletedAt: null },
-      _sum: { amountPaise: true },
+      _sum: { amountMinor: true },
       _max: { spentAt: true },
     });
     const aggByTripId = new Map<string, { sum: number; max: Date | null }>();
     for (const a of aggregates) {
       aggByTripId.set(a.tripId, {
-        sum: a._sum.amountPaise ?? 0,
+        sum: a._sum.amountMinor ?? 0,
         max: a._max.spentAt,
       });
     }
@@ -199,7 +199,7 @@ export class TripRepository implements ITripRepository {
       const agg = aggByTripId.get(t.id);
       return {
         ...t,
-        totalAmountPaise: agg?.sum ?? 0,
+        totalAmountMinor: agg?.sum ?? 0,
         latestExpenseAt: agg?.max ?? null,
       };
     });

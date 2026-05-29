@@ -75,7 +75,7 @@ function toCreateExpenseInput(body: CreateExpenseBody): CreateExpenseInput {
   const base = {
     tripId: body.tripId,
     title: body.title,
-    amountPaise: body.amountPaise,
+    amountMinor: body.amountMinor,
     paidByUserId: body.paidByUserId,
     category: body.category,
     spentAt: body.spentAt,
@@ -93,7 +93,7 @@ function toCreateExpenseInput(body: CreateExpenseBody): CreateExpenseInput {
       return {
         ...base,
         splitType: ExpenseSplitType.EXACT,
-        // body.participants is { userId, exactAmountPaise }[] which satisfies
+        // body.participants is { userId, exactAmountMinor }[] which satisfies
         // RawParticipantInput (all non-userId fields are optional on that type).
         participants: body.participants,
       };

@@ -2,16 +2,16 @@
  * EQUAL split calculator.
  *
  * Division rule:
- *   baseShare  = floor(amountPaise / n)
- *   payerShare = amountPaise − baseShare × (n − 1)
+ *   baseShare  = floor(amountMinor / n)
+ *   payerShare = amountMinor − baseShare × (n − 1)
  *
  * Every non-payer participant receives baseShare. The payer receives
  * payerShare, which absorbs the floor-division remainder so that
- * SUM(sharePaise) = amountPaise exactly.
+ * SUM(shareMinor) = amountMinor exactly.
  *
  * Why payer absorbs the remainder (not the first participant alphabetically):
  *   For equal splits the payer is already the most "invested" party — they
- *   laid out the cash. Giving them the extra paise keeps the rule simple,
+ *   laid out the cash. Giving them the extra minor unit keeps the rule simple,
  *   auditable, and consistent with the historical BalanceEngine.splitEqual()
  *   behaviour that pre-dates this refactor.
  *
@@ -22,8 +22,8 @@
  *   the two code paths can never drift apart — there is only one
  *   implementation of equal-split arithmetic in the codebase.
  *
- * Metadata: all three audit fields (basisPoints, shareUnits, exactAmountPaise)
- * are null. EQUAL splits are fully reconstructible from amountPaise and n, so
+ * Metadata: all three audit fields (basisPoints, shareUnits, exactAmountMinor)
+ * are null. EQUAL splits are fully reconstructible from amountMinor and n, so
  * storing metadata would be redundant.
  */
 
@@ -35,7 +35,7 @@ export class EqualSplitCalculator implements SplitCalculator {
   readonly splitType = ExpenseSplitType.EQUAL;
 
   calculate(
-    amountPaise: number,
+    amountMinor: number,
     participants: readonly RawParticipantInput[],
     payerId: string,
   ): SplitResult[] {
@@ -43,17 +43,17 @@ export class EqualSplitCalculator implements SplitCalculator {
     // amount, empty list, payer not in participants) and will throw before
     // returning if any precondition is violated.
     const shares = BalanceEngine.splitEqual(
-      amountPaise,
+      amountMinor,
       participants.map((p) => p.userId),
       payerId,
     );
 
     return shares.map((s) => ({
       userId: s.userId,
-      sharePaise: s.sharePaise,
+      shareMinor: s.shareMinor,
       basisPoints: null,
       shareUnits: null,
-      exactAmountPaise: null,
+      exactAmountMinor: null,
     }));
   }
 }

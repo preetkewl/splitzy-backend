@@ -11,7 +11,7 @@
  *   - immutability: no PATCH/DELETE endpoints exist
  *   - SUM(net) === 0 after every settlement
  *   - history listing: newest first, with pagination meta
- *   - totalReimbursedPaise reflects the running ledger total
+ *   - totalReimbursedMinor reflects the running ledger total
  *   - full settlement of the Goa fixture yields zero balances + zero transfers
  */
 import { randomUUID } from 'node:crypto';
@@ -142,25 +142,25 @@ function authHeaders(token: string): Record<string, string> {
 
 interface ExpensePayload {
   title: string;
-  amountPaise: number;
+  amountMinor: number;
   payerKey: 'aarya' | 'aarav' | 'meera' | 'kabir';
   category: 'STAY' | 'FOOD' | 'TRAVEL' | 'FUN' | 'MISC';
   spentAt: string;
 }
 const SEED_EXPENSES: ExpensePayload[] = [
-  { title: 'Airbnb in Anjuna',   amountPaise: 1_240_000, payerKey: 'aarav', category: 'STAY',   spentAt: '2024-12-06T10:00:00.000Z' },
-  { title: 'Petrol — scooter',   amountPaise:    80_000, payerKey: 'aarya', category: 'TRAVEL', spentAt: '2024-12-06T10:00:00.000Z' },
-  { title: 'Dinner at Thalassa', amountPaise:   460_000, payerKey: 'meera', category: 'FOOD',   spentAt: '2024-12-06T10:00:00.000Z' },
-  { title: 'Beach shack lunch',  amountPaise:   184_000, payerKey: 'kabir', category: 'FOOD',   spentAt: '2024-12-07T10:00:00.000Z' },
-  { title: 'Dudhsagar cab',      amountPaise:   320_000, payerKey: 'aarya', category: 'TRAVEL', spentAt: '2024-12-07T10:00:00.000Z' },
-  { title: 'Club entry',         amountPaise:   240_000, payerKey: 'aarav', category: 'FUN',    spentAt: '2024-12-07T10:00:00.000Z' },
+  { title: 'Airbnb in Anjuna',   amountMinor: 1_240_000, payerKey: 'aarav', category: 'STAY',   spentAt: '2024-12-06T10:00:00.000Z' },
+  { title: 'Petrol — scooter',   amountMinor:    80_000, payerKey: 'aarya', category: 'TRAVEL', spentAt: '2024-12-06T10:00:00.000Z' },
+  { title: 'Dinner at Thalassa', amountMinor:   460_000, payerKey: 'meera', category: 'FOOD',   spentAt: '2024-12-06T10:00:00.000Z' },
+  { title: 'Beach shack lunch',  amountMinor:   184_000, payerKey: 'kabir', category: 'FOOD',   spentAt: '2024-12-07T10:00:00.000Z' },
+  { title: 'Dudhsagar cab',      amountMinor:   320_000, payerKey: 'aarya', category: 'TRAVEL', spentAt: '2024-12-07T10:00:00.000Z' },
+  { title: 'Club entry',         amountMinor:   240_000, payerKey: 'aarav', category: 'FUN',    spentAt: '2024-12-07T10:00:00.000Z' },
 ];
 
 type BalancesData = {
-  totalAmountPaise: number;
-  totalReimbursedPaise: number;
-  members: { userId: string; netPaise: number }[];
-  suggestedTransfers: { fromUserId: string; toUserId: string; amountPaise: number }[];
+  totalAmountMinor: number;
+  totalReimbursedMinor: number;
+  members: { userId: string; netMinor: number }[];
+  suggestedTransfers: { fromUserId: string; toUserId: string; amountMinor: number }[];
 };
 
 async function fetchBalances(app: TestApp, token: string, tripId: string): Promise<BalancesData> {
@@ -199,7 +199,7 @@ async function main(): Promise<void> {
       body: JSON.stringify({
         tripId,
         title: e.title,
-        amountPaise: e.amountPaise,
+        amountMinor: e.amountMinor,
         paidByUserId: userByKey[e.payerKey].userId,
         category: e.category,
         spentAt: e.spentAt,
@@ -215,11 +215,11 @@ async function main(): Promise<void> {
 
   console.log('\n· initial balances (no settlements yet)');
   const before = await fetchBalances(app, aarya.token, tripId);
-  check('initial totalReimbursed = 0', before.totalReimbursedPaise === 0);
+  check('initial totalReimbursed = 0', before.totalReimbursedMinor === 0);
   check('initial 3 transfers (Goa fixture)', before.suggestedTransfers.length === 3);
   check(
     'initial: aarav net = +849000',
-    before.members.find((m) => m.userId === aarav.userId)?.netPaise === 849_000,
+    before.members.find((m) => m.userId === aarav.userId)?.netMinor === 849_000,
   );
 
   console.log('\n· validation rejections');
@@ -230,7 +230,7 @@ async function main(): Promise<void> {
       tripId,
       fromUserId: aarya.userId,
       toUserId: aarya.userId,
-      amountPaise: 100,
+      amountMinor: 100,
     }),
   });
   check('self-settlement -> 400', selfSettle.status === 400);
@@ -243,7 +243,7 @@ async function main(): Promise<void> {
       tripId,
       fromUserId: stranger.userId,
       toUserId: aarav.userId,
-      amountPaise: 100,
+      amountMinor: 100,
     }),
   });
   check('non-member fromUser -> 400', nonMemberFrom.status === 400);
@@ -255,7 +255,7 @@ async function main(): Promise<void> {
       tripId,
       fromUserId: aarya.userId,
       toUserId: aarav.userId,
-      amountPaise: 100,
+      amountMinor: 100,
     }),
   });
   check('non-member caller -> 404 (no enumeration)', nonMemberCaller.status === 404);
@@ -267,7 +267,7 @@ async function main(): Promise<void> {
       tripId,
       fromUserId: aarya.userId,
       toUserId: aarav.userId,
-      amountPaise: -100,
+      amountMinor: -100,
     }),
   });
   check('negative amount -> 422', negAmount.status === 422);
@@ -279,7 +279,7 @@ async function main(): Promise<void> {
       tripId,
       fromUserId: aarya.userId,
       toUserId: aarav.userId,
-      amountPaise: 12.5,
+      amountMinor: 12.5,
     }),
   });
   check('non-integer amount -> 422', floatAmount.status === 422);
@@ -287,7 +287,7 @@ async function main(): Promise<void> {
   console.log('\n· UPI settlement: aarya pays aarav 100k (partial)');
   type SettlementDto = {
     id: string;
-    amountPaise: number;
+    amountMinor: number;
     method: string;
     status: string;
     settledAt: string | null;
@@ -302,7 +302,7 @@ async function main(): Promise<void> {
       tripId,
       fromUserId: aarya.userId,
       toUserId: aarav.userId,
-      amountPaise: 100_000,
+      amountMinor: 100_000,
       method: 'UPI',
       externalRef: 'TXN1234567',
       note: 'first chunk',
@@ -321,20 +321,20 @@ async function main(): Promise<void> {
 
   console.log('\n· balances reflect partial settlement');
   const after1 = await fetchBalances(app, aarya.token, tripId);
-  check('totalReimbursed = 100000', after1.totalReimbursedPaise === 100_000);
-  check('SUM(net) still 0', after1.members.reduce((s, m) => s + m.netPaise, 0) === 0);
+  check('totalReimbursed = 100000', after1.totalReimbursedMinor === 100_000);
+  check('SUM(net) still 0', after1.members.reduce((s, m) => s + m.netMinor, 0) === 0);
   check(
     'aarya net moves up by 100k (-231k → -131k)',
-    after1.members.find((m) => m.userId === aarya.userId)?.netPaise === -131_000,
+    after1.members.find((m) => m.userId === aarya.userId)?.netMinor === -131_000,
   );
   check(
     'aarav net moves down by 100k (+849k → +749k)',
-    after1.members.find((m) => m.userId === aarav.userId)?.netPaise === 749_000,
+    after1.members.find((m) => m.userId === aarav.userId)?.netMinor === 749_000,
   );
   check(
     'meera + kabir nets unchanged',
-    after1.members.find((m) => m.userId === meera.userId)?.netPaise === -171_000 &&
-      after1.members.find((m) => m.userId === kabir.userId)?.netPaise === -447_000,
+    after1.members.find((m) => m.userId === meera.userId)?.netMinor === -171_000 &&
+      after1.members.find((m) => m.userId === kabir.userId)?.netMinor === -447_000,
   );
 
   console.log('\n· CASH settlement: kabir pays aarav 200k');
@@ -345,7 +345,7 @@ async function main(): Promise<void> {
       tripId,
       fromUserId: kabir.userId,
       toUserId: aarav.userId,
-      amountPaise: 200_000,
+      amountMinor: 200_000,
       method: 'CASH',
     }),
   });
@@ -363,7 +363,7 @@ async function main(): Promise<void> {
       tripId,
       fromUserId: meera.userId,
       toUserId: aarav.userId,
-      amountPaise: 50_000,
+      amountMinor: 50_000,
       method: 'MANUAL',
     }),
   });
@@ -374,11 +374,11 @@ async function main(): Promise<void> {
 
   console.log('\n· running totals');
   const after3 = await fetchBalances(app, aarya.token, tripId);
-  check('totalReimbursed = 350000', after3.totalReimbursedPaise === 350_000);
-  check('SUM(net) still 0', after3.members.reduce((s, m) => s + m.netPaise, 0) === 0);
+  check('totalReimbursed = 350000', after3.totalReimbursedMinor === 350_000);
+  check('SUM(net) still 0', after3.members.reduce((s, m) => s + m.netMinor, 0) === 0);
   check(
     'aarav net = +849k − 350k = +499k',
-    after3.members.find((m) => m.userId === aarav.userId)?.netPaise === 499_000,
+    after3.members.find((m) => m.userId === aarav.userId)?.netMinor === 499_000,
   );
 
   console.log('\n· list settlement history');
@@ -410,7 +410,7 @@ async function main(): Promise<void> {
     const patch = await app.fetchJson(`/api/v1/settlements/${first.id}`, {
       method: 'PATCH',
       headers: authHeaders(aarya.token),
-      body: JSON.stringify({ amountPaise: 1 }),
+      body: JSON.stringify({ amountMinor: 1 }),
     });
     check('PATCH /settlements/:id -> 404 (no such route)', patch.status === 404);
     const del = await app.fetchJson(`/api/v1/settlements/${first.id}`, {
@@ -434,24 +434,24 @@ async function main(): Promise<void> {
         tripId,
         fromUserId: t.fromUserId,
         toUserId: t.toUserId,
-        amountPaise: t.amountPaise,
+        amountMinor: t.amountMinor,
         method: 'UPI',
       }),
     });
-    check(`settle ${String(t.amountPaise)} → 201`, res.status === 201);
+    check(`settle ${String(t.amountMinor)} → 201`, res.status === 201);
   }
 
   const final = await fetchBalances(app, aarya.token, tripId);
-  check('final SUM(net) = 0', final.members.reduce((s, m) => s + m.netPaise, 0) === 0);
-  check('every net = 0', final.members.every((m) => m.netPaise === 0));
+  check('final SUM(net) = 0', final.members.reduce((s, m) => s + m.netMinor, 0) === 0);
+  check('every net = 0', final.members.every((m) => m.netMinor === 0));
   check('final suggested transfers empty', final.suggestedTransfers.length === 0);
   check(
     'final totalReimbursed === total of original Goa creditor balance (849k)',
-    final.totalReimbursedPaise === 849_000,
+    final.totalReimbursedMinor === 849_000,
   );
   check(
-    'final totalAmountPaise unchanged (settlements do not touch expenses)',
-    final.totalAmountPaise === 2_524_000,
+    'final totalAmountMinor unchanged (settlements do not touch expenses)',
+    final.totalAmountMinor === 2_524_000,
   );
 
   console.log('\n· soft-deleted expense + settlement: balances stay consistent');
@@ -471,16 +471,16 @@ async function main(): Promise<void> {
       const afterDelete = await fetchBalances(app, aarya.token, tripId);
       check(
         'after expense delete: SUM(net) still 0',
-        afterDelete.members.reduce((s, m) => s + m.netPaise, 0) === 0,
+        afterDelete.members.reduce((s, m) => s + m.netMinor, 0) === 0,
         afterDelete.members,
       );
       check(
         'after expense delete: totalReimbursed unchanged (settlements immutable)',
-        afterDelete.totalReimbursedPaise === 849_000,
+        afterDelete.totalReimbursedMinor === 849_000,
       );
       check(
         'after expense delete: totalAmount drops by 460k',
-        afterDelete.totalAmountPaise === 2_524_000 - 460_000,
+        afterDelete.totalAmountMinor === 2_524_000 - 460_000,
       );
     }
   }

@@ -8,7 +8,7 @@ import type { SettlementWithUsers } from '../mapper/settlement.mapper.js';
 export interface SettlementForBalance {
   fromUserId: string;
   toUserId: string;
-  amountPaise: number;
+  amountMinor: number;
 }
 
 // ── Inputs ───────────────────────────────────────────────────────────────────
@@ -17,7 +17,7 @@ export interface CreateSettlementData {
   tripId: string;
   fromUserId: string;
   toUserId: string;
-  amountPaise: number;
+  amountMinor: number;
   method: SettlementMethod;
   note: string | null;
   externalRef: string | null;
@@ -61,7 +61,7 @@ export class SettlementRepository implements ISettlementRepository {
         tripId: data.tripId,
         fromUserId: data.fromUserId,
         toUserId: data.toUserId,
-        amountPaise: data.amountPaise,
+        amountMinor: data.amountMinor,
         method: data.method,
         note: data.note,
         externalRef: data.externalRef,
@@ -112,13 +112,13 @@ export class SettlementRepository implements ISettlementRepository {
   async findCompletedForBalances(tripId: string): Promise<SettlementForBalance[]> {
     const rows = await this.prisma.settlement.findMany({
       where: { tripId, status: SettlementStatus.COMPLETED },
-      select: { fromUserId: true, toUserId: true, amountPaise: true },
+      select: { fromUserId: true, toUserId: true, amountMinor: true },
       orderBy: { createdAt: 'asc' },
     });
     return rows.map((r) => ({
       fromUserId: r.fromUserId,
       toUserId: r.toUserId,
-      amountPaise: r.amountPaise,
+      amountMinor: r.amountMinor,
     }));
   }
 }

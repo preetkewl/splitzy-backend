@@ -4,9 +4,9 @@
  * Design principles:
  *   - All calculators are pure functions: no DB, no I/O, no side effects.
  *   - Identical inputs → identical outputs, always (deterministic).
- *   - SUM(SplitResult.sharePaise) === amountPaise for every valid output.
+ *   - SUM(SplitResult.shareMinor) === amountMinor for every valid output.
  *   - The balance engine (balance-engine.ts) is unchanged — it only ever
- *     reads sharePaise. The metadata fields below are audit/display data.
+ *     reads shareMinor. The metadata fields below are audit/display data.
  *
  * Adding a new split type in the future:
  *   1. Add the enum value in an isolated migration (see architecture docs).
@@ -31,14 +31,14 @@ import type { ExpenseSplitType } from '@prisma/client';
  * throwing a descriptive error if not.
  *
  *   EQUAL:   only userId is needed; all amount fields are absent.
- *   EXACT:   userId + exactAmountPaise (≥ 0 paise, client-specified).
+ *   EXACT:   userId + exactAmountMinor (≥ 0, client-specified).
  *   PERCENT: userId + basisPoints (1–10 000; 10 000 bp = 100%).
  *   SHARES:  userId + shareUnits (1–1 000 000 positive integer ratio).
  */
 export interface RawParticipantInput {
   readonly userId: string;
-  /** EXACT only — the exact paise amount this participant owes. */
-  readonly exactAmountPaise?: number;
+  /** EXACT only — the exact minor unit amount this participant owes. */
+  readonly exactAmountMinor?: number;
   /** PERCENT only — this participant's share in basis points. */
   readonly basisPoints?: number;
   /** SHARES only — this participant's ratio unit count. */
@@ -50,13 +50,13 @@ export interface RawParticipantInput {
 /**
  * The result produced by a split calculator for one participant.
  *
- * sharePaise is the ONLY field the balance engine and accounting layer
+ * shareMinor is the ONLY field the balance engine and accounting layer
  * ever read. The three nullable metadata fields are persisted to
  * expense_participants for audit and display purposes only — they do
  * not affect balance calculations.
  *
  * Invariant guaranteed by every SplitCalculator implementation:
- *   SUM(sharePaise across all SplitResults for one expense) === amountPaise
+ *   SUM(shareMinor across all SplitResults for one expense) === amountMinor
  *
  * This invariant is additionally asserted by the service layer before
  * any database write (write-time defense) and by the balance engine when
@@ -67,10 +67,10 @@ export interface SplitResult {
 
   /**
    * ── CANONICAL ACCOUNTING FIELD ──────────────────────────────────────────
-   * The final computed integer share this participant owes, in paise.
+   * The final computed integer share this participant owes, in minor units.
    * Written once, never modified. Read by the balance engine.
    */
-  readonly sharePaise: number;
+  readonly shareMinor: number;
 
   /**
    * ── AUDIT METADATA ──────────────────────────────────────────────────────
@@ -83,8 +83,8 @@ export interface SplitResult {
   readonly basisPoints: number | null;
   /** SHARES: participant's raw ratio unit count (1–1 000 000). */
   readonly shareUnits: number | null;
-  /** EXACT: client-specified exact paise amount. For EXACT, sharePaise === this. */
-  readonly exactAmountPaise: number | null;
+  /** EXACT: client-specified exact minor unit amount. For EXACT, shareMinor === this. */
+  readonly exactAmountMinor: number | null;
 }
 
 // ── Calculator interface ──────────────────────────────────────────────────────
@@ -94,11 +94,11 @@ export interface SplitResult {
  *
  * Implementations MUST:
  *   1. Be pure and stateless (no DB, no repos, no side effects).
- *   2. Produce SUM(sharePaise) === amountPaise exactly for any valid input.
+ *   2. Produce SUM(shareMinor) === amountMinor exactly for any valid input.
  *   3. Throw with a descriptive Error if the input violates preconditions.
  *   4. Produce identical output for identical input (determinism required
  *      for historical reproducibility of balance calculations).
- *   5. Use integer-only arithmetic for all paise values.
+ *   5. Use integer-only arithmetic for all minor unit values.
  *
  * The payerId parameter is accepted by all calculators for symmetry and
  * future extensibility. EXACT / PERCENT / SHARES calculators currently
@@ -112,17 +112,17 @@ export interface SplitCalculator {
   /**
    * Compute per-participant shares.
    *
-   * @param amountPaise  Total expense amount. Positive integer. Validated
+   * @param amountMinor  Total expense amount. Positive integer. Validated
    *                     by the service before this call.
    * @param participants Raw inputs. Non-empty. Each must carry the field
    *                     appropriate for this calculator's split type.
    * @param payerId      userId of the payer. Validated by the service to
    *                     be present in participants before this call.
    * @returns            One SplitResult per participant (same order as input).
-   *                     SUM(sharePaise) === amountPaise.
+   *                     SUM(shareMinor) === amountMinor.
    */
   calculate(
-    amountPaise: number,
+    amountMinor: number,
     participants: readonly RawParticipantInput[],
     payerId: string,
   ): SplitResult[];

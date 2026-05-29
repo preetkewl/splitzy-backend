@@ -93,7 +93,7 @@ function frontendSimplify(net: Map<string, number>): FrontendTransfer[] {
 function backendNet(): NetBalance[] {
   const expenses: ExpenseInput[] = seedExpenses.map((e) => ({
     payerId: e.payer,
-    amountPaise: e.amount,
+    amountMinor: e.amount,
     participants: BalanceEngine.splitEqual(e.amount, [...memberIds], e.payer),
   }));
   return BalanceEngine.computeNetBalances([...memberIds], expenses);
@@ -119,7 +119,7 @@ console.log('\n· Goa fixture — net balances match frontend (clean division)')
 const fe = frontendComputeNet();
 const beRows = backendNet();
 const beMap = new Map<string, number>();
-for (const r of beRows) beMap.set(r.userId, r.netPaise);
+for (const r of beRows) beMap.set(r.userId, r.netMinor);
 
 for (const id of memberIds) {
   check(
@@ -128,7 +128,7 @@ for (const id of memberIds) {
     { fe: fe.get(id), be: beMap.get(id) },
   );
 }
-const sumBe = beRows.reduce((s, r) => s + r.netPaise, 0);
+const sumBe = beRows.reduce((s, r) => s + r.netMinor, 0);
 check('SUM(backend net) === 0', sumBe === 0, { sum: sumBe });
 
 console.log('\n· Goa fixture — simplify matches frontend');
@@ -145,7 +145,7 @@ check(
 // triples. Order may technically differ if there are ties, but the Goa
 // fixture has none.
 const feKeys = new Set(feTransfers.map((t) => `${t.from}→${t.to}:${String(t.amount)}`));
-const beKeys = new Set(beTransfers.map((t) => `${t.fromUserId}→${t.toUserId}:${String(t.amountPaise)}`));
+const beKeys = new Set(beTransfers.map((t) => `${t.fromUserId}→${t.toUserId}:${String(t.amountMinor)}`));
 check(
   'transfer set matches frontend',
   feKeys.size === beKeys.size && [...feKeys].every((k) => beKeys.has(k)),
@@ -153,7 +153,7 @@ check(
 );
 
 const sumFeTransfers = feTransfers.reduce((s, t) => s + t.amount, 0);
-const sumBeTransfers = beTransfers.reduce((s, t) => s + t.amountPaise, 0);
+const sumBeTransfers = beTransfers.reduce((s, t) => s + t.amountMinor, 0);
 check(
   'SUM(transfers) matches between frontend and backend',
   sumFeTransfers === sumBeTransfers,

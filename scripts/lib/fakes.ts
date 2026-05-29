@@ -13,6 +13,7 @@ import type {
   DeviceToken,
   Expense,
   ExpenseParticipant,
+  ExpensePayment,
   FriendRequest,
   Friendship,
   Platform,
@@ -70,6 +71,7 @@ export class FakeStore {
   trips = new Map<string, Trip>();
   tripMembers = new Map<string, TripMember>(); // key: `${tripId}:${userId}`
   expenses = new Map<string, Expense>();
+  expensePayments = new Map<string, ExpensePayment>(); // key: paymentId
   expenseParticipants = new Map<string, ExpenseParticipant>(); // key: `${expenseId}:${userId}`
   friendships = new Map<string, Friendship>(); // key: `${userAId}:${userBId}` (canonical)
   friendRequests = new Map<string, FriendRequest>(); // key: requestId
@@ -309,7 +311,7 @@ export class FakeTripRepository implements ITripRepository {
     return {
       ...trip,
       members: this.membersFor(trip.id),
-      totalAmountPaise: 0,
+      totalAmountMinor: 0,
       latestExpenseAt: null,
     };
   }
@@ -328,7 +330,7 @@ export class FakeTripRepository implements ITripRepository {
     return {
       ...t,
       members: this.membersFor(tripId),
-      totalAmountPaise: 0, // expense module fills this in
+      totalAmountMinor: 0, // expense module fills this in
       latestExpenseAt: null,
     };
   }
@@ -350,7 +352,7 @@ export class FakeTripRepository implements ITripRepository {
     const rows: TripListRow[] = page.map((t) => ({
       ...t,
       members: this.membersFor(t.id),
-      totalAmountPaise: 0,
+      totalAmountMinor: 0,
       latestExpenseAt: null,
     }));
     return { rows, total: trips.length };
@@ -439,8 +441,14 @@ export class FakeExpenseRepository implements IExpenseRepository {
   constructor(private readonly store: FakeStore) {}
 
   private hydrate(row: Expense): ExpenseWithRelations {
-    const paidBy = this.store.users.get(row.paidById);
-    if (paidBy === undefined) throw new Error(`hydrate: payer ${row.paidById} missing`);
+    const payments = Array.from(this.store.expensePayments.values())
+      .filter((p) => p.expenseId === row.id)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .map((p) => {
+        const user = this.store.users.get(p.userId);
+        if (user === undefined) throw new Error(`hydrate: payer ${p.userId} missing`);
+        return { ...p, user };
+      });
     const participants = Array.from(this.store.expenseParticipants.values())
       .filter((p) => p.expenseId === row.id)
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
@@ -449,7 +457,7 @@ export class FakeExpenseRepository implements IExpenseRepository {
         if (user === undefined) throw new Error(`hydrate: participant ${p.userId} missing`);
         return { ...p, user };
       });
-    return { ...row, paidBy, participants };
+    return { ...row, payments, participants };
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await
@@ -459,13 +467,12 @@ export class FakeExpenseRepository implements IExpenseRepository {
       id: this.store.newId(),
       tripId: data.tripId,
       title: data.title,
-      amountPaise: data.amountPaise,
+      amountMinor: data.amountMinor,
       category: data.category,
-      splitType: 'EQUAL',
+      splitType: data.splitType,
       // splitMeta is null for EQUAL splits — the audit snapshot is only
       // populated by the service layer for non-EQUAL split types.
       splitMeta: null,
-      paidById: data.paidById,
       createdById: data.createdById,
       spentAt: data.spentAt,
       createdAt: now,
@@ -473,17 +480,29 @@ export class FakeExpenseRepository implements IExpenseRepository {
       deletedAt: null,
     };
     this.store.expenses.set(expense.id, expense);
+    for (const pay of data.payments) {
+      const payment: ExpensePayment = {
+        id: this.store.newId(),
+        expenseId: expense.id,
+        userId: pay.userId,
+        contributionMinor: pay.contributionMinor,
+        paymentMeta: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.store.expensePayments.set(payment.id, payment);
+    }
     for (const s of data.shares) {
       const p: ExpenseParticipant = {
         id: this.store.newId(),
         expenseId: expense.id,
         userId: s.userId,
-        sharePaise: s.sharePaise,
+        shareMinor: s.shareMinor,
         // Audit metadata fields: null for EQUAL splits. Non-EQUAL splits have
         // exactly one of these set; the DB enforces single_meta_chk constraint.
-        basisPoints: null,
-        shareUnits: null,
-        exactAmountPaise: null,
+        basisPoints: s.basisPoints,
+        shareUnits: s.shareUnits,
+        exactAmountMinor: s.exactAmountMinor,
         createdAt: now,
         updatedAt: now,
       };
@@ -524,14 +543,18 @@ export class FakeExpenseRepository implements IExpenseRepository {
     );
     rows.sort((a, b) => a.spentAt.getTime() - b.spentAt.getTime());
     return rows.map((e) => {
+      const payments = Array.from(this.store.expensePayments.values())
+        .filter((p) => p.expenseId === e.id)
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+        .map((p) => ({ userId: p.userId, contributionMinor: p.contributionMinor }));
       const participants = Array.from(this.store.expenseParticipants.values())
         .filter((p) => p.expenseId === e.id)
         .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
-        .map((p) => ({ userId: p.userId, sharePaise: p.sharePaise }));
+        .map((p) => ({ userId: p.userId, shareMinor: p.shareMinor }));
       return {
         expenseId: e.id,
-        amountPaise: e.amountPaise,
-        payerId: e.paidById,
+        amountMinor: e.amountMinor,
+        payments,
         participants,
       };
     });
@@ -790,7 +813,7 @@ export class FakeSettlementRepository implements ISettlementRepository {
       tripId: data.tripId,
       fromUserId: data.fromUserId,
       toUserId: data.toUserId,
-      amountPaise: data.amountPaise,
+      amountMinor: data.amountMinor,
       status: SettlementStatus.COMPLETED,
       method: data.method,
       note: data.note,
@@ -834,7 +857,7 @@ export class FakeSettlementRepository implements ISettlementRepository {
     return rows.map((r) => ({
       fromUserId: r.fromUserId,
       toUserId: r.toUserId,
-      amountPaise: r.amountPaise,
+      amountMinor: r.amountMinor,
     }));
   }
 }

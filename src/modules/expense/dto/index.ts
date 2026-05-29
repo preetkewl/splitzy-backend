@@ -4,7 +4,7 @@
  * Backward-compatibility notes:
  *   - ExpenseParticipantDto gains three nullable audit fields. Old clients
  *     that ignore unknown JSON keys are unaffected; they receive null for
- *     all three and continue to read sharePaise as the single source of truth.
+ *     all three and continue to read shareMinor as the single source of truth.
  *   - ExpenseDto gains splitType (always present) and splitMeta (null for EQUAL,
  *     typed object for EXACT/PERCENT/SHARES). Old clients that don't know these
  *     fields may ignore them safely.
@@ -17,9 +17,9 @@
  *   of `unknown`. This lets client codegen tools (OpenAPI generators, dart_mappable
  *   for Flutter) produce concrete types rather than dynamic maps.
  *   The shape mirrors what the service persists: { type, participants: { userId → rawValue } }
- *   where rawValue is exactAmountPaise / basisPoints / shareUnits respectively.
+ *   where rawValue is exactAmountMinor / basisPoints / shareUnits respectively.
  *   EQUAL expenses carry splitMeta: null because the split is fully
- *   reconstructible from amountPaise + participant count.
+ *   reconstructible from amountMinor + participant count.
  */
 import type { ExpenseCategory, ExpenseSplitType } from '@prisma/client';
 import type { RawParticipantInput } from '../engine/split-types.js';
@@ -37,15 +37,15 @@ export interface UserPreviewDto {
 
 /**
  * EXACT audit snapshot stored on the expense row.
- * participants maps userId → exactAmountPaise (the value the client supplied).
- * This is identical to sharePaise for EXACT splits and is stored for
+ * participants maps userId → exactAmountMinor (the value the client supplied).
+ * This is identical to shareMinor for EXACT splits and is stored for
  * explicitness and future audit queries.
  */
 export interface ExactSplitMetaDto {
   type: 'EXACT';
   /**
-   * Map of userId → exactAmountPaise as supplied by the client.
-   * All values are non-negative integers (paise).
+   * Map of userId → exactAmountMinor as supplied by the client.
+   * All values are non-negative integers (minor units).
    */
   participants: Record<string, number>;
 }
@@ -82,7 +82,7 @@ export interface SharesSplitMetaDto {
  * Typed discriminated union over all non-EQUAL split audit snapshots.
  *
  * Null for EQUAL expenses — the split is fully reconstructible from
- * amountPaise and participant count, so metadata is intentionally omitted.
+ * amountMinor and participant count, so metadata is intentionally omitted.
  */
 export type SplitMetaDto = ExactSplitMetaDto | PercentSplitMetaDto | SharesSplitMetaDto;
 
@@ -93,7 +93,7 @@ export interface ExpenseParticipantDto extends UserPreviewDto {
    * Canonical accounting value — the only field the balance engine reads.
    * Present for every split type. Source of truth for all balance math.
    */
-  sharePaise: number;
+  shareMinor: number;
   /**
    * Audit metadata fields — at most one is non-null per participant.
    * Null for EQUAL splits (split is reconstructible; audit data is noise).
@@ -104,15 +104,15 @@ export interface ExpenseParticipantDto extends UserPreviewDto {
   basisPoints: number | null;
   /** SHARES only: raw ratio unit count (1–1 000 000). */
   shareUnits: number | null;
-  /** EXACT only: client-specified exact paise amount. Equals sharePaise for EXACT. */
-  exactAmountPaise: number | null;
+  /** EXACT only: client-specified exact minor unit amount. Equals shareMinor for EXACT. */
+  exactAmountMinor: number | null;
 }
 
 export interface ExpenseDto {
   id: string;
   tripId: string;
   title: string;
-  amountPaise: number;
+  amountMinor: number;
   category: ExpenseCategory;
   /**
    * Split strategy used for this expense. Always present.
@@ -144,11 +144,11 @@ export interface ExpenseDto {
 
 export interface MemberBalanceDto extends UserPreviewDto {
   /** > 0: owed to this user; < 0: this user owes others; 0: settled. */
-  netPaise: number;
-  /** SUM of amountPaise from every non-deleted expense this user paid. */
-  totalPaidPaise: number;
-  /** SUM of sharePaise across every non-deleted expense this user participates in. */
-  totalSharePaise: number;
+  netMinor: number;
+  /** SUM of amountMinor from every non-deleted expense this user paid. */
+  totalPaidMinor: number;
+  /** SUM of shareMinor across every non-deleted expense this user participates in. */
+  totalShareMinor: number;
   /** False if the user has since left the trip (historical data preserved). */
   isCurrentMember: boolean;
 }
@@ -156,12 +156,12 @@ export interface MemberBalanceDto extends UserPreviewDto {
 export interface SettlementSuggestionDto {
   fromUserId: string;
   toUserId: string;
-  amountPaise: number;
+  amountMinor: number;
 }
 
 export interface BalanceSummaryDto {
-  totalAmountPaise: number;
-  totalReimbursedPaise: number;
+  totalAmountMinor: number;
+  totalReimbursedMinor: number;
   members: MemberBalanceDto[];
   suggestedTransfers: SettlementSuggestionDto[];
 }
@@ -171,7 +171,7 @@ export interface BalanceSummaryDto {
 export interface CreateExpenseInput {
   tripId: string;
   title: string;
-  amountPaise: number;
+  amountMinor: number;
   paidByUserId: string;
   /**
    * Defaults to EQUAL for backward compatibility with old clients that
@@ -188,7 +188,7 @@ export interface CreateExpenseInput {
    * EXACT / PERCENT / SHARES only. Required when splitType !== EQUAL.
    * Contains the per-participant split values in the format appropriate
    * for the split type:
-   *   EXACT:   { userId, exactAmountPaise }
+   *   EXACT:   { userId, exactAmountMinor }
    *   PERCENT: { userId, basisPoints }
    *   SHARES:  { userId, shareUnits }
    */

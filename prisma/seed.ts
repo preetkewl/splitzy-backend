@@ -67,19 +67,19 @@ const SAT = new Date('2024-12-07T10:00:00.000Z');
 
 interface SeedExpense {
   title: string;
-  amountPaise: number;
+  amountMinor: number;
   payer: 'aarya' | 'aarav' | 'meera' | 'kabir';
   category: ExpenseCategory;
   spentAt: Date;
 }
 
 const SEED_EXPENSES: SeedExpense[] = [
-  { title: 'Airbnb in Anjuna',   amountPaise: 1_240_000, payer: 'aarav', category: ExpenseCategory.STAY,   spentAt: FRI },
-  { title: 'Petrol — scooter',   amountPaise:    80_000, payer: 'aarya', category: ExpenseCategory.TRAVEL, spentAt: FRI },
-  { title: 'Dinner at Thalassa', amountPaise:   460_000, payer: 'meera', category: ExpenseCategory.FOOD,   spentAt: FRI },
-  { title: 'Beach shack lunch',  amountPaise:   184_000, payer: 'kabir', category: ExpenseCategory.FOOD,   spentAt: SAT },
-  { title: 'Dudhsagar cab',      amountPaise:   320_000, payer: 'aarya', category: ExpenseCategory.TRAVEL, spentAt: SAT },
-  { title: 'Club entry',         amountPaise:   240_000, payer: 'aarav', category: ExpenseCategory.FUN,    spentAt: SAT },
+  { title: 'Airbnb in Anjuna',   amountMinor: 1_240_000, payer: 'aarav', category: ExpenseCategory.STAY,   spentAt: FRI },
+  { title: 'Petrol — scooter',   amountMinor:    80_000, payer: 'aarya', category: ExpenseCategory.TRAVEL, spentAt: FRI },
+  { title: 'Dinner at Thalassa', amountMinor:   460_000, payer: 'meera', category: ExpenseCategory.FOOD,   spentAt: FRI },
+  { title: 'Beach shack lunch',  amountMinor:   184_000, payer: 'kabir', category: ExpenseCategory.FOOD,   spentAt: SAT },
+  { title: 'Dudhsagar cab',      amountMinor:   320_000, payer: 'aarya', category: ExpenseCategory.TRAVEL, spentAt: SAT },
+  { title: 'Club entry',         amountMinor:   240_000, payer: 'aarav', category: ExpenseCategory.FUN,    spentAt: SAT },
 ];
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -88,6 +88,7 @@ const SEED_EXPENSES: SeedExpense[] = [
 
 async function clearAll(): Promise<void> {
   // FK-safe order: leaves first, parents last.
+  await prisma.expensePayment.deleteMany();
   await prisma.expenseParticipant.deleteMany();
   await prisma.expense.deleteMany();
   await prisma.settlement.deleteMany();
@@ -150,22 +151,24 @@ async function main(): Promise<void> {
 
   for (const e of SEED_EXPENSES) {
     const payerId = userByKey[e.payer].id;
-    const shares = BalanceEngine.splitEqual(e.amountPaise, memberIds, payerId);
+    const shares = BalanceEngine.splitEqual(e.amountMinor, memberIds, payerId);
 
     await prisma.expense.create({
       data: {
         tripId: trip.id,
         title: e.title,
-        amountPaise: e.amountPaise,
+        amountMinor: e.amountMinor,
         category: e.category,
-        paidById: payerId,
         createdById: payerId,
         spentAt: e.spentAt,
         createdAt: e.spentAt,
+        payments: {
+          create: [{ userId: payerId, contributionMinor: e.amountMinor }],
+        },
         participants: {
           create: shares.map((s) => ({
             userId: s.userId,
-            sharePaise: s.sharePaise,
+            shareMinor: s.shareMinor,
           })),
         },
       },
@@ -173,7 +176,7 @@ async function main(): Promise<void> {
   }
   console.log(`  ✓ expenses: ${SEED_EXPENSES.length}`);
 
-  const total = SEED_EXPENSES.reduce((s, e) => s + e.amountPaise, 0);
+  const total = SEED_EXPENSES.reduce((s, e) => s + e.amountMinor, 0);
   console.log(`\n✅ seed complete — total trip spend: ₹${(total / 100).toFixed(2)}`);
 }
 

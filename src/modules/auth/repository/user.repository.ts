@@ -104,33 +104,33 @@ export class UserRepository implements IUserRepository {
 
     for (const { tripId } of memberships) {
       const [paid, owed, settledOut, settledIn] = await Promise.all([
-        // What the user paid as expense payer in this trip
-        this.prisma.expense.aggregate({
-          where: { tripId, paidById: userId, deletedAt: null },
-          _sum: { amountPaise: true },
+        // What the user contributed as a payer in this trip (payment dimension)
+        this.prisma.expensePayment.aggregate({
+          where: { userId, expense: { tripId, deletedAt: null } },
+          _sum: { contributionMinor: true },
         }),
-        // What the user owes as a participant in this trip
+        // What the user owes as a participant in this trip (obligation dimension)
         this.prisma.expenseParticipant.aggregate({
           where: { userId, expense: { tripId, deletedAt: null } },
-          _sum: { sharePaise: true },
+          _sum: { shareMinor: true },
         }),
         // Settlements the user sent in this trip (reduces debt)
         this.prisma.settlement.aggregate({
           where: { tripId, fromUserId: userId, status: SettlementStatus.COMPLETED },
-          _sum: { amountPaise: true },
+          _sum: { amountMinor: true },
         }),
         // Settlements the user received in this trip (reduces credit)
         this.prisma.settlement.aggregate({
           where: { tripId, toUserId: userId, status: SettlementStatus.COMPLETED },
-          _sum: { amountPaise: true },
+          _sum: { amountMinor: true },
         }),
       ]);
 
       const net =
-        (paid._sum.amountPaise ?? 0) -
-        (owed._sum.sharePaise ?? 0) +
-        (settledOut._sum.amountPaise ?? 0) -
-        (settledIn._sum.amountPaise ?? 0);
+        (paid._sum.contributionMinor ?? 0) -
+        (owed._sum.shareMinor ?? 0) +
+        (settledOut._sum.amountMinor ?? 0) -
+        (settledIn._sum.amountMinor ?? 0);
 
       if (net !== 0) return true;
     }

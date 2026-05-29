@@ -63,18 +63,18 @@ export class SplitCalculatorRegistry {
    * This is the method the ExpenseService calls directly.
    *
    * @param splitType   Which strategy to use.
-   * @param amountPaise Total expense amount; validated positive integer.
+   * @param amountMinor Total expense amount; validated positive integer.
    * @param participants Raw per-participant inputs for this split type.
    * @param payerId     userId of the paying member; validated in participants.
-   * @returns           SplitResult[] with SUM(sharePaise) === amountPaise.
+   * @returns           SplitResult[] with SUM(shareMinor) === amountMinor.
    */
   compute(
     splitType: ExpenseSplitType,
-    amountPaise: number,
+    amountMinor: number,
     participants: readonly RawParticipantInput[],
     payerId: string,
   ): SplitResult[] {
-    return this.get(splitType).calculate(amountPaise, participants, payerId);
+    return this.get(splitType).calculate(amountMinor, participants, payerId);
   }
 }
 

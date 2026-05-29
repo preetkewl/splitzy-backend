@@ -127,8 +127,8 @@ export class TripService {
     if (target.role === 'OWNER') {
       throw ApiError.forbidden('The trip owner cannot be removed');
     }
-    const netPaise = await this.getMemberNetBalance(tripId, targetUserId);
-    if (netPaise !== 0) {
+    const netMinor = await this.getMemberNetBalance(tripId, targetUserId);
+    if (netMinor !== 0) {
       throw ApiError.badRequest('User has pending balances. Please settle first.');
     }
     await this.trips.removeMember(tripId, targetUserId);
@@ -148,14 +148,16 @@ export class TripService {
     ]);
     let net = 0;
     for (const e of expenseRows) {
-      if (e.payerId === userId) net += e.amountPaise;
+      for (const payment of e.payments) {
+        if (payment.userId === userId) net += payment.contributionMinor;
+      }
       for (const p of e.participants) {
-        if (p.userId === userId) net -= p.sharePaise;
+        if (p.userId === userId) net -= p.shareMinor;
       }
     }
     for (const s of settlementRows) {
-      if (s.fromUserId === userId) net += s.amountPaise;
-      if (s.toUserId === userId) net -= s.amountPaise;
+      if (s.fromUserId === userId) net += s.amountMinor;
+      if (s.toUserId === userId) net -= s.amountMinor;
     }
     return net;
   }

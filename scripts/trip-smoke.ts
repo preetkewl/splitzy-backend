@@ -165,7 +165,7 @@ async function main(): Promise<void> {
     memberCount: number;
     members: { userId: string; role: string }[];
     description: string | null;
-    balanceSummary: { totalAmountPaise: number };
+    balanceSummary: { totalAmountMinor: number };
   }>(create.body)
     ? create.body.data
     : null;
@@ -179,7 +179,7 @@ async function main(): Promise<void> {
       trip.members.filter((m) => m.role === 'MEMBER').length === 3,
   );
   check('description echoed back', trip.description === 'Anjuna + Dudhsagar');
-  check('balanceSummary present (placeholder)', trip.balanceSummary.totalAmountPaise === 0);
+  check('balanceSummary present (placeholder)', trip.balanceSummary.totalAmountMinor === 0);
 
   console.log('\n· create with non-existent member -> 400');
   const badMember = await app.fetchJson('/api/v1/trips', {

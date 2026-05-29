@@ -21,7 +21,7 @@ export class SettlementController {
       tripId: req.body.tripId,
       fromUserId: req.body.fromUserId,
       toUserId: req.body.toUserId,
-      amountPaise: req.body.amountPaise,
+      amountMinor: req.body.amountMinor,
       method: req.body.method,
       note: req.body.note ?? null,
       externalRef: req.body.externalRef ?? null,

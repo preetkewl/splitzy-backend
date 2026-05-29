@@ -19,7 +19,7 @@ export function toSettlementDto(row: SettlementWithUsers): SettlementDto {
   return {
     id: row.id,
     tripId: row.tripId,
-    amountPaise: row.amountPaise,
+    amountMinor: row.amountMinor,
     status: row.status,
     method: row.method,
     note: row.note,

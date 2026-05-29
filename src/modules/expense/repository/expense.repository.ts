@@ -3,6 +3,7 @@ import type {
   ExpenseCategory,
   ExpenseSplitType,
   ExpenseParticipant,
+  ExpensePayment,
   PrismaClient,
   TripMember,
   User,
@@ -15,18 +16,20 @@ import type { SplitResult } from '../engine/split-types.js';
 // ── Row shapes ────────────────────────────────────────────────────────────────
 
 export type ExpenseParticipantWithUser = ExpenseParticipant & { user: User };
+export type ExpensePaymentWithUser = ExpensePayment & { user: User };
 
 export interface ExpenseWithRelations extends Expense {
-  paidBy: User;
+  payments: ExpensePaymentWithUser[];
   participants: ExpenseParticipantWithUser[];
 }
 
 export interface ExpenseAggregateRow {
   expenseId: string;
-  amountPaise: number;
-  payerId: string;
+  amountMinor: number;
+  /** All payers for this expense — one entry in Phase 2 (single payer). */
+  payments: { userId: string; contributionMinor: number }[];
   /** Lean projection: only fields the balance engine needs. */
-  participants: { userId: string; sharePaise: number }[];
+  participants: { userId: string; shareMinor: number }[];
 }
 
 export interface TripMemberWithUser extends TripMember {
@@ -38,7 +41,7 @@ export interface TripMemberWithUser extends TripMember {
 export interface CreateExpenseData {
   tripId: string;
   title: string;
-  amountPaise: number;
+  amountMinor: number;
   category: ExpenseCategory;
   /**
    * Set by the service from the validated request. No longer hardcoded to
@@ -46,14 +49,20 @@ export interface CreateExpenseData {
    * which split type is "default". That decision belongs in the service.
    */
   splitType: ExpenseSplitType;
-  paidById: string;
+  /**
+   * Payment dimension: who paid how much.
+   * Phase 2: always one entry (contributionMinor === amountMinor).
+   * Phase 3: may contain multiple entries; SUM(contributionMinor) === amountMinor
+   * is guaranteed by the service before this method is called.
+   */
+  payments: readonly { userId: string; contributionMinor: number }[];
   createdById: string;
   spentAt: Date;
   /**
    * Pre-computed per-participant shares from the SplitCalculator.
-   * sharePaise is the canonical accounting value written to the DB.
-   * basisPoints / shareUnits / exactAmountPaise are audit metadata.
-   * SUM(shares[i].sharePaise) === amountPaise is guaranteed by the
+   * shareMinor is the canonical accounting value written to the DB.
+   * basisPoints / shareUnits / exactAmountMinor are audit metadata.
+   * SUM(shares[i].shareMinor) === amountMinor is guaranteed by the
    * service before this method is called.
    */
   shares: readonly SplitResult[];
@@ -75,8 +84,8 @@ export interface IExpenseRepository {
     pagination: PaginationParams,
   ): Promise<{ rows: ExpenseWithRelations[]; total: number }>;
   /**
-   * Lean fetch for the balance engine. Only sharePaise is selected —
-   * the engine never reads basisPoints / shareUnits / exactAmountPaise.
+   * Lean fetch for the balance engine. Only shareMinor and contributionMinor
+   * are selected — the engine never reads basisPoints / shareUnits / exactAmountMinor.
    */
   findForBalances(tripId: string): Promise<ExpenseAggregateRow[]>;
   softDelete(expenseId: string): Promise<Expense>;
@@ -85,7 +94,10 @@ export interface IExpenseRepository {
 // ── Prisma include shape ──────────────────────────────────────────────────────
 
 const expenseInclude = {
-  paidBy: true,
+  payments: {
+    include: { user: true },
+    orderBy: { createdAt: Prisma.SortOrder.asc },
+  },
   participants: {
     include: { user: true },
     orderBy: { createdAt: Prisma.SortOrder.asc },
@@ -103,30 +115,38 @@ export class ExpenseRepository implements IExpenseRepository {
     if (data.shares.length === 0) {
       throw new Error('ExpenseRepository.create: shares must not be empty');
     }
+    if (data.payments.length === 0) {
+      throw new Error('ExpenseRepository.create: payments must not be empty');
+    }
 
     return this.prisma.expense.create({
       data: {
         tripId: data.tripId,
         title: data.title,
-        amountPaise: data.amountPaise,
+        amountMinor: data.amountMinor,
         category: data.category,
         // Passed through from the service — not hardcoded here.
         splitType: data.splitType,
         // Nullable JSONB audit snapshot. Prisma accepts null for optional
         // JsonValue columns; explicit null is the correct value for EQUAL.
         splitMeta: data.splitMeta ?? Prisma.JsonNull,
-        paidById: data.paidById,
         createdById: data.createdById,
         spentAt: data.spentAt,
+        payments: {
+          create: data.payments.map((p) => ({
+            userId: p.userId,
+            contributionMinor: p.contributionMinor,
+          })),
+        },
         participants: {
           create: data.shares.map((s) => ({
             userId: s.userId,
             // Canonical accounting value — always present.
-            sharePaise: s.sharePaise,
+            shareMinor: s.shareMinor,
             // Audit metadata — exactly one is non-null for non-EQUAL splits.
             basisPoints: s.basisPoints,
             shareUnits: s.shareUnits,
-            exactAmountPaise: s.exactAmountPaise,
+            exactAmountMinor: s.exactAmountMinor,
           })),
         },
       },
@@ -166,9 +186,10 @@ export class ExpenseRepository implements IExpenseRepository {
   }
 
   /**
-   * Lean projection for the balance engine — only sharePaise is selected.
+   * Lean projection for the balance engine — only shareMinor and
+   * contributionMinor are selected.
    * The balance engine is split-type-agnostic and never reads the audit
-   * metadata columns (basisPoints / shareUnits / exactAmountPaise).
+   * metadata columns (basisPoints / shareUnits / exactAmountMinor).
    * This query intentionally omits those columns for efficiency.
    */
   async findForBalances(tripId: string): Promise<ExpenseAggregateRow[]> {
@@ -176,10 +197,13 @@ export class ExpenseRepository implements IExpenseRepository {
       where: { tripId, ...notDeleted },
       select: {
         id: true,
-        amountPaise: true,
-        paidById: true,
+        amountMinor: true,
+        payments: {
+          select: { userId: true, contributionMinor: true },
+          orderBy: { createdAt: Prisma.SortOrder.asc },
+        },
         participants: {
-          select: { userId: true, sharePaise: true },
+          select: { userId: true, shareMinor: true },
           orderBy: { createdAt: Prisma.SortOrder.asc },
         },
       },
@@ -187,8 +211,8 @@ export class ExpenseRepository implements IExpenseRepository {
     });
     return rows.map((r) => ({
       expenseId: r.id,
-      amountPaise: r.amountPaise,
-      payerId: r.paidById,
+      amountMinor: r.amountMinor,
+      payments: r.payments,
       participants: r.participants,
     }));
   }

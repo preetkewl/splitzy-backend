@@ -30,8 +30,8 @@ export const TRIP_COVER_COLORS = [
 // ── Expense ──────────────────────────────────────────────────────────────────
 
 /// Largest amount we'll accept for a single expense — guards against typos
-/// like "1000000000". In paise: ₹10,00,00,000 (10 crore).
-export const MAX_EXPENSE_AMOUNT_PAISE = 100_000_000_000;
+/// like "1000000000". e.g. in INR: ₹10,00,00,000 (10 crore).
+export const MAX_EXPENSE_AMOUNT_MINOR = 100_000_000_000;
 
 /// Largest expense title length (DB column has no hard limit; this is a
 /// sanity bound applied at the validation layer).

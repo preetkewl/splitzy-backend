@@ -88,7 +88,7 @@ export class ExpenseService {
 
     // 7. Payer must appear in the participant list for all split types.
     //    For EQUAL: they always owe their share.
-    //    For EXACT: their exactAmountPaise may be 0 (they covered everyone).
+    //    For EXACT: their exactAmountMinor may be 0 (they covered everyone).
     //    For PERCENT / SHARES: basisPoints / shareUnits must be ≥ 1 (Zod
     //    already enforced this at the API boundary).
     const payerInParticipants = rawParticipants.some((p) => p.userId === input.paidByUserId);
@@ -102,7 +102,7 @@ export class ExpenseService {
     //    (e.g. PERCENT basisPoints don't sum to 10 000).
     let splitResults: SplitResult[];
     try {
-      splitResults = splitRegistry.compute(splitType, input.amountPaise, rawParticipants, input.paidByUserId);
+      splitResults = splitRegistry.compute(splitType, input.amountMinor, rawParticipants, input.paidByUserId);
     } catch (err) {
       // Calculator errors indicate invalid client input (wrong sums, missing
       // fields). Surface them as 400 Bad Request rather than 500.
@@ -110,24 +110,24 @@ export class ExpenseService {
       throw ApiError.badRequest(message);
     }
 
-    // 9. Write-time invariant: SUM(sharePaise) must equal amountPaise exactly.
+    // 9. Write-time invariant: SUM(shareMinor) must equal amountMinor exactly.
     //    The calculator is responsible for this; this assertion is the last
     //    line of defense before the DB write. A violation here is a bug in
     //    the calculator, not a user error — log it loudly.
-    const shareSum = splitResults.reduce((acc, s) => acc + s.sharePaise, 0);
-    if (shareSum !== input.amountPaise) {
+    const shareSum = splitResults.reduce((acc, s) => acc + s.shareMinor, 0);
+    if (shareSum !== input.amountMinor) {
       logger.error(
         {
           splitType,
-          amountPaise: input.amountPaise,
+          amountMinor: input.amountMinor,
           shareSum,
-          diff: shareSum - input.amountPaise,
+          diff: shareSum - input.amountMinor,
         },
         'split invariant violated — calculator produced wrong sum',
       );
       throw new Error(
-        `Split invariant violated: shares sum to ${String(shareSum)} paise but ` +
-          `expense is ${String(input.amountPaise)} paise (diff: ${String(shareSum - input.amountPaise)})`,
+        `Split invariant violated: shares sum to ${String(shareSum)} minor units but ` +
+          `expense is ${String(input.amountMinor)} minor units (diff: ${String(shareSum - input.amountMinor)})`,
       );
     }
 
@@ -136,13 +136,15 @@ export class ExpenseService {
 
     // 11. Persist. The nested-create is atomic at the Prisma level.
     //     SplitResult[] maps cleanly to CreateExpenseData.shares.
+    //     Phase 2: single payer from the API maps to one ExpensePayment covering
+    //     the full amount. Phase 3 will introduce multi-payer input.
     const created = await this.expenses.create({
       tripId: input.tripId,
       title: input.title.trim(),
-      amountPaise: input.amountPaise,
+      amountMinor: input.amountMinor,
       category: input.category ?? ExpenseCategory.MISC,
       splitType,
-      paidById: input.paidByUserId,
+      payments: [{ userId: input.paidByUserId, contributionMinor: input.amountMinor }],
       createdById: userId,
       spentAt: input.spentAt,
       shares: splitResults,
@@ -154,7 +156,7 @@ export class ExpenseService {
         expenseId: created.id,
         tripId: input.tripId,
         splitType,
-        amountPaise: input.amountPaise,
+        amountMinor: input.amountMinor,
         participantCount: splitResults.length,
       },
       'expense created',
@@ -165,9 +167,10 @@ export class ExpenseService {
       .map((m) => m.userId)
       .filter((id) => id !== input.paidByUserId);
     if (notifyUserIds.length > 0) {
+      const primaryPayerName = created.payments[0]?.user.name ?? 'Someone';
       void this.notifications.sendToUsers(notifyUserIds, {
         title: 'New expense added',
-        body: `${created.paidBy.name} added "${created.title}"`,
+        body: `${primaryPayerName} added "${created.title}"`,
         type: 'EXPENSE_ADDED',
         data: { tripId: input.tripId, expenseId: created.id },
       });
@@ -224,19 +227,24 @@ export class ExpenseService {
     ]);
 
     // Build per-user totals alongside the engine input. The balance engine
-    // is entirely split-type-agnostic: it reads only sharePaise, which is
+    // is entirely split-type-agnostic: it reads only shareMinor, which is
     // the canonical accounting value regardless of how it was computed.
     const totalsByUser = new Map<string, { paid: number; share: number }>();
-    let totalAmountPaise = 0;
+    let totalAmountMinor = 0;
 
     for (const e of expenseRows) {
-      totalAmountPaise += e.amountPaise;
-      const payerTotals = totalsByUser.get(e.payerId) ?? { paid: 0, share: 0 };
-      payerTotals.paid += e.amountPaise;
-      totalsByUser.set(e.payerId, payerTotals);
+      totalAmountMinor += e.amountMinor;
+      // Payment dimension: credit each payer with their contribution.
+      // Phase 2: one payment per expense (contributionMinor === amountMinor).
+      for (const payment of e.payments) {
+        const payerTotals = totalsByUser.get(payment.userId) ?? { paid: 0, share: 0 };
+        payerTotals.paid += payment.contributionMinor;
+        totalsByUser.set(payment.userId, payerTotals);
+      }
+      // Obligation dimension: debit each participant with their share.
       for (const p of e.participants) {
         const t = totalsByUser.get(p.userId) ?? { paid: 0, share: 0 };
-        t.share += p.sharePaise;
+        t.share += p.shareMinor;
         totalsByUser.set(p.userId, t);
       }
     }
@@ -248,16 +256,25 @@ export class ExpenseService {
     const completedTransfers: SettlementTransfer[] = settlementRows.map((s) => ({
       fromUserId: s.fromUserId,
       toUserId: s.toUserId,
-      amountPaise: s.amountPaise,
+      amountMinor: s.amountMinor,
     }));
-    const totalReimbursedPaise = completedTransfers.reduce(
-      (sum, t) => sum + t.amountPaise,
+    const totalReimbursedMinor = completedTransfers.reduce(
+      (sum, t) => sum + t.amountMinor,
       0,
     );
 
+    // Build BalanceEngine-compatible input from the normalized payment rows.
+    // Phase 2 bridge: all data is single-payer, so payments[0] is always the
+    // sole payer. Phase 3 will update the balance engine to accept payments[].
+    const engineExpenses = expenseRows.map((e) => ({
+      payerId: e.payments[0]?.userId ?? '',
+      amountMinor: e.amountMinor,
+      participants: e.participants,
+    }));
+
     const netBalances = BalanceEngine.computeNetBalances(
       orderedMemberIds,
-      expenseRows,
+      engineExpenses,
       completedTransfers,
     );
     const transfers = BalanceEngine.simplify(netBalances);
@@ -278,8 +295,8 @@ export class ExpenseService {
     });
 
     return toBalanceSummary({
-      totalAmountPaise,
-      totalReimbursedPaise,
+      totalAmountMinor,
+      totalReimbursedMinor,
       members: memberBalances,
       transfers,
     });
@@ -329,11 +346,11 @@ export class ExpenseService {
    * Build the immutable splitMeta JSON snapshot stored on the Expense row.
    *
    * Returns null for EQUAL — the split is fully reconstructible from
-   * amountPaise and participant count, so metadata would be redundant.
+   * amountMinor and participant count, so metadata would be redundant.
    *
    * For other types, stores a { participants: { userId → rawValue } } map
    * where rawValue is the per-participant figure the client originally supplied
-   * (exactAmountPaise / basisPoints / shareUnits respectively). The balance
+   * (exactAmountMinor / basisPoints / shareUnits respectively). The balance
    * engine never reads this field; it is audit/display data only.
    */
   private buildSplitMeta(
@@ -347,7 +364,7 @@ export class ExpenseService {
     for (const p of rawParticipants) {
       let value: number;
       if (splitType === ExpenseSplitType.EXACT) {
-        value = p.exactAmountPaise ?? 0;
+        value = p.exactAmountMinor ?? 0;
       } else if (splitType === ExpenseSplitType.PERCENT) {
         value = p.basisPoints ?? 0;
       } else {
