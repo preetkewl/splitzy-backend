@@ -112,9 +112,9 @@ ALTER TABLE "expenses"
 -- ── Group B: expense_participants ─────────────────────────────────────────────
 
 ALTER TABLE "expense_participants"
-  ADD COLUMN "basisPoints"      INTEGER,
-  ADD COLUMN "shareUnits"       INTEGER,
-  ADD COLUMN "exactAmountPaise" INTEGER;
+  ADD COLUMN "basis_points"       INTEGER,
+  ADD COLUMN "share_units"        INTEGER,
+  ADD COLUMN "exact_amount_paise" INTEGER;
 
 
 -- ── Check constraints on expense_participants ─────────────────────────────────
@@ -123,9 +123,9 @@ ALTER TABLE "expense_participants"
 ALTER TABLE "expense_participants"
   ADD CONSTRAINT "expense_participants_single_meta_chk" CHECK (
     (
-      CASE WHEN "basisPoints"      IS NOT NULL THEN 1 ELSE 0 END +
-      CASE WHEN "shareUnits"       IS NOT NULL THEN 1 ELSE 0 END +
-      CASE WHEN "exactAmountPaise" IS NOT NULL THEN 1 ELSE 0 END
+      CASE WHEN "basis_points"       IS NOT NULL THEN 1 ELSE 0 END +
+      CASE WHEN "share_units"        IS NOT NULL THEN 1 ELSE 0 END +
+      CASE WHEN "exact_amount_paise" IS NOT NULL THEN 1 ELSE 0 END
     ) <= 1
   );
 
@@ -133,7 +133,7 @@ ALTER TABLE "expense_participants"
 -- when populated. NULL columns pass this constraint vacuously.
 ALTER TABLE "expense_participants"
   ADD CONSTRAINT "expense_participants_meta_range_chk" CHECK (
-    (  "basisPoints"      IS NULL OR ("basisPoints"      >= 1       AND "basisPoints"      <= 10000))
-    AND ("shareUnits"       IS NULL OR ("shareUnits"       >= 1       AND "shareUnits"       <= 1000000))
-    AND ("exactAmountPaise" IS NULL OR  "exactAmountPaise" >= 0)
+    (  "basis_points"       IS NULL OR ("basis_points"       >= 1 AND "basis_points"       <= 10000))
+    AND ("share_units"        IS NULL OR ("share_units"        >= 1 AND "share_units"        <= 1000000))
+    AND ("exact_amount_paise" IS NULL OR  "exact_amount_paise" >= 0)
   );
