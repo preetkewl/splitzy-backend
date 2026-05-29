@@ -100,6 +100,12 @@ export class FakeUserRepository implements IUserRepository {
     return u;
   }
   // eslint-disable-next-line @typescript-eslint/require-await
+  async findManyByIds(ids: readonly string[]): Promise<User[]> {
+    return ids
+      .map((id) => this.store.users.get(id))
+      .filter((u): u is User => u !== undefined && u.deletedAt === null);
+  }
+  // eslint-disable-next-line @typescript-eslint/require-await
   async findByFirebaseUid(firebaseUid: string): Promise<User | null> {
     for (const u of this.store.users.values()) {
       if (u.firebaseUid === firebaseUid && u.deletedAt === null) return u;

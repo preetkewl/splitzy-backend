@@ -18,6 +18,24 @@
  *   stricter — payer absorbs the remainder, sum stays exactly zero.
  *   For amounts evenly divisible by n (e.g. the Goa fixture) the two
  *   algorithms produce identical net balances and identical transfers.
+ *
+ * Phase 3 — multi-contributor model:
+ *   ExpenseInput now carries a payments[] array instead of a single payerId.
+ *   Each payment entry credits its contributor; each participant entry incurs
+ *   a debt. The engine is fully agnostic to the number of contributors.
+ *
+ *   Computation per user:
+ *     net = SUM(contributionMinor in payments)
+ *         − SUM(shareMinor in participants)
+ *         + SUM(amountMinor in completed settlements sent)
+ *         − SUM(amountMinor in completed settlements received)
+ *
+ *   Validation enforced at read time:
+ *     - SUM(payments.contributionMinor) === expense.amountMinor
+ *     - at least one payment per expense
+ *     - all contributionMinor values are positive integers
+ *     - no duplicate contributor userId within one expense
+ *     - SUM(participants.shareMinor) === expense.amountMinor
  */
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -27,12 +45,23 @@ export interface ParticipantShare {
   shareMinor: number;
 }
 
+/** One contributor's payment towards an expense. */
+export interface ExpensePaymentInput {
+  userId: string;
+  /** Amount this user paid, in minor units. Must be a positive integer. */
+  contributionMinor: number;
+}
+
 export interface ExpenseInput {
-  /** Whichever user laid out the cash. Must appear in `participants`. */
-  payerId: string;
   /** Total amount in minor units; positive integer. */
   amountMinor: number;
-  /** Per-participant share. SUM(shareMinor) must equal amountMinor. */
+  /**
+   * Who paid how much. Non-empty, no duplicate userIds.
+   * SUM(contributionMinor) must equal amountMinor.
+   * All contributionMinor values must be positive integers.
+   */
+  payments: readonly ExpensePaymentInput[];
+  /** Per-participant obligation. SUM(shareMinor) must equal amountMinor. */
   participants: readonly ParticipantShare[];
 }
 
@@ -52,13 +81,18 @@ export interface SettlementTransfer {
 
 export const BalanceEngine = {
   /**
-   * Equal-split shares for one expense. Payer absorbs floor-division
-   * remainder so SUM(shares) === amountMinor exactly.
+   * Equal-split obligation shares for one expense. The remainder absorber
+   * (payerId) takes the extra minor unit(s) from floor-division so that
+   * SUM(shares) === amountMinor exactly.
    *
-   * Throws if input is malformed (non-positive amount, empty list, payer
-   * missing from participants). Defensive — service-layer validation
-   * should catch these too, but the engine is the last line of defense
-   * for the math invariant.
+   * Note: payerId here controls who absorbs the rounding remainder among
+   * participants — it is independent of ExpenseInput.payments, which
+   * records who actually paid. Conventionally the primary payer absorbs
+   * the remainder, but nothing forces this.
+   *
+   * Throws on malformed input (non-positive amount, empty list, payerId
+   * not in participantIds). Service-layer validation should catch these
+   * first; the engine is the last line of defence.
    */
   splitEqual(
     amountMinor: number,
@@ -84,22 +118,23 @@ export const BalanceEngine = {
   },
 
   /**
-   * Per-user net balance:
+   * Compute per-user net balance across all expenses and completed settlements.
    *
-   *   SUM(paid as payer)
-   * − SUM(share owed as participant)
-   * + SUM(amount paid in completed settlements)
-   * − SUM(amount received in completed settlements)
+   * For each expense:
+   *   - every payment entry credits its contributor: net[userId] += contributionMinor
+   *   - every participant entry debits their obligation: net[userId] -= shareMinor
    *
-   * The settlement contribution preserves zero-sum: each settlement
-   * row adds +amount to the payer and −amount to the receiver, so
-   * SUM(net) stays 0.
+   * For each completed settlement (fromUserId → toUserId):
+   *   - debtor's position improves:  net[fromUserId] += amountMinor
+   *   - creditor's position shrinks: net[toUserId]   -= amountMinor
    *
-   * Returns one row per `memberId` in input order, plus rows for any
-   * non-member who appears in the expenses or settlements (e.g. a
-   * removed user with residual activity), sorted by `userId` ASC.
-   * Order of memberIds drives the downstream simplify() ordering — pass
-   * them in a stable order (e.g. tripMembers.joinedAt ASC).
+   * SUM(net) === 0 always holds (payments and shares both sum to amountMinor;
+   * settlements cancel each other out).
+   *
+   * Returns one entry per memberId in the supplied order, followed by any
+   * extra userIds found in expenses or settlements (e.g. former members),
+   * sorted ASC by userId. Pass memberIds in a stable order (e.g. joinedAt ASC)
+   * so that simplify() produces deterministic transfer lists.
    */
   computeNetBalances(
     memberIds: readonly string[],
@@ -110,15 +145,42 @@ export const BalanceEngine = {
     for (const id of memberIds) net.set(id, 0);
 
     for (const expense of expenses) {
-      net.set(expense.payerId, (net.get(expense.payerId) ?? 0) + expense.amountMinor);
+      // ── Validate and credit the payment (contribution) dimension ──────────
+      if (expense.payments.length === 0) {
+        throw new Error('computeNetBalances: expense must have at least one payment');
+      }
+      const contributorsSeen = new Set<string>();
+      let contributionSum = 0;
+      for (const payment of expense.payments) {
+        if (!Number.isInteger(payment.contributionMinor) || payment.contributionMinor <= 0) {
+          throw new Error(
+            `computeNetBalances: contributionMinor must be a positive integer (got ${String(payment.contributionMinor)})`,
+          );
+        }
+        if (contributorsSeen.has(payment.userId)) {
+          throw new Error(
+            `computeNetBalances: duplicate contributor '${payment.userId}' in expense`,
+          );
+        }
+        contributorsSeen.add(payment.userId);
+        contributionSum += payment.contributionMinor;
+        net.set(payment.userId, (net.get(payment.userId) ?? 0) + payment.contributionMinor);
+      }
+      if (contributionSum !== expense.amountMinor) {
+        throw new Error(
+          `computeNetBalances: payment contributions (${String(contributionSum)}) do not sum to amount (${String(expense.amountMinor)})`,
+        );
+      }
+
+      // ── Debit the obligation (participant share) dimension ────────────────
       let shareSum = 0;
       for (const p of expense.participants) {
         net.set(p.userId, (net.get(p.userId) ?? 0) - p.shareMinor);
         shareSum += p.shareMinor;
       }
-      // Belt-and-braces: every persisted expense was created with shares
-      // that sum to amountMinor. If anyone hand-edits the DB and breaks
-      // that, we want a loud failure here.
+      // Belt-and-braces: every persisted expense was created with shares that
+      // sum to amountMinor. A mismatch here means hand-edited DB data — loud
+      // failure is the right response.
       if (shareSum !== expense.amountMinor) {
         throw new Error(
           `computeNetBalances: participant shares (${String(shareSum)}) do not sum to amount (${String(expense.amountMinor)})`,

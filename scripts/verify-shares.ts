@@ -92,8 +92,8 @@ function frontendSimplify(net: Map<string, number>): FrontendTransfer[] {
 
 function backendNet(): NetBalance[] {
   const expenses: ExpenseInput[] = seedExpenses.map((e) => ({
-    payerId: e.payer,
     amountMinor: e.amount,
+    payments: [{ userId: e.payer, contributionMinor: e.amount }],
     participants: BalanceEngine.splitEqual(e.amount, [...memberIds], e.payer),
   }));
   return BalanceEngine.computeNetBalances([...memberIds], expenses);

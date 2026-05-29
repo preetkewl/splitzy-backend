@@ -720,6 +720,7 @@ heading('Response DTO shape (TypeScript type assertions)');
     category: ExpenseCategory.FOOD,
     splitType: ExpenseSplitType.EQUAL,
     paidBy: userPreview,
+    payments: [{ user: userPreview, contributionMinor: 120_000 }],
     participants: [
       {
         ...userPreview,

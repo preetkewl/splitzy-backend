@@ -3,6 +3,7 @@ import type {
   BalanceSummaryDto,
   ExpenseDto,
   ExpenseParticipantDto,
+  ExpensePaymentDto,
   MemberBalanceDto,
   SettlementSuggestionDto,
   SplitMetaDto,
@@ -14,6 +15,7 @@ import type {
 } from '../engine/balance-engine.js';
 import type {
   ExpenseParticipantWithUser,
+  ExpensePaymentWithUser,
   ExpenseWithRelations,
 } from '../repository/expense.repository.js';
 
@@ -23,6 +25,13 @@ export function toUserPreview(user: User): UserPreviewDto {
     name: user.name,
     avatarColor: user.avatarColor,
     avatarUrl: user.avatarUrl,
+  };
+}
+
+export function toExpensePaymentDto(payment: ExpensePaymentWithUser): ExpensePaymentDto {
+  return {
+    user: toUserPreview(payment.user),
+    contributionMinor: payment.contributionMinor,
   };
 }
 
@@ -42,10 +51,9 @@ export function toExpenseParticipant(p: ExpenseParticipantWithUser): ExpensePart
 /**
  * Wires `canDelete` based on the requesting user's relationship to the expense.
  *
- * `paidBy` is derived from the first payment row (creation order). The
- * ExpenseDto contract still exposes a single `paidBy` for Phase 2
- * backward-compatibility. Phase 3 will add a `payments[]` field to the DTO
- * and expose full multi-payer data to clients.
+ * Phase 4: the response now includes a canonical `payments[]` array alongside
+ * the deprecated `paidBy` field. `paidBy` is derived from payments[0] for
+ * backward compat with old clients. New clients should read `payments[]`.
  */
 export function toExpenseDto(
   row: ExpenseWithRelations,
@@ -67,9 +75,10 @@ export function toExpenseDto(
     amountMinor: row.amountMinor,
     category: row.category,
     splitType: row.splitType,
-    // Derived from the primary payment record (first by createdAt).
-    // Phase 2: always the single payer. Phase 3 will surface payments[].
+    // Deprecated: derived from payments[0] for backward compat with old clients.
     paidBy: toUserPreview(primaryPayment.user),
+    // Phase 4 canonical payment list. Always non-empty.
+    payments: row.payments.map(toExpensePaymentDto),
     participants: row.participants.map(toExpenseParticipant),
     // Audit snapshot — null for EQUAL expenses, structured JSON for others.
     // Prisma returns the JSONB column as `JsonValue` (object | null). We cast

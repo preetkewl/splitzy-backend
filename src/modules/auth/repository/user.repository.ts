@@ -21,6 +21,13 @@ export interface UpdateUserInput {
 
 export interface IUserRepository {
   findById(id: string): Promise<User | null>;
+  /**
+   * Batch lookup — fetches all active (non-deleted) users whose ids are in the
+   * supplied list. Returns an empty array when `ids` is empty. Order is
+   * undefined. Used by balance computation to avoid N+1 queries when former
+   * members appear in the balance summary.
+   */
+  findManyByIds(ids: readonly string[]): Promise<User[]>;
   findByFirebaseUid(firebaseUid: string): Promise<User | null>;
   findByHandle(handle: string): Promise<User | null>;
   findByPhone(phone: string): Promise<User | null>;
@@ -40,6 +47,13 @@ export class UserRepository implements IUserRepository {
 
   findById(id: string): Promise<User | null> {
     return this.prisma.user.findFirst({ where: { id, deletedAt: null } });
+  }
+
+  findManyByIds(ids: readonly string[]): Promise<User[]> {
+    if (ids.length === 0) return Promise.resolve([]);
+    return this.prisma.user.findMany({
+      where: { id: { in: [...ids] }, deletedAt: null },
+    });
   }
 
   findByFirebaseUid(firebaseUid: string): Promise<User | null> {

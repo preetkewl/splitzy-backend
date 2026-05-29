@@ -67,42 +67,55 @@ export class ExpenseService {
     if (trip === null) throw ApiError.notFound('Trip not found');
     const memberIds = new Set(trip.members.map((m) => m.userId));
 
-    // 4. Payer must be a current trip member.
-    if (!memberIds.has(input.paidByUserId)) {
-      throw ApiError.badRequest('Payer is not a member of this trip');
+    // 4. Resolve effective payments from either the canonical payments[] field
+    //    (Phase 4 clients) or the legacy paidByUserId field (old clients).
+    //    Validation above guarantees at least one is present.
+    const effectivePayments = this.resolveEffectivePayments(input);
+
+    // 5. Every payer must be a current trip member.
+    for (const payment of effectivePayments) {
+      if (!memberIds.has(payment.userId)) {
+        throw ApiError.badRequest(`Payer ${payment.userId} is not a member of this trip`);
+      }
     }
 
-    // 5. Resolve raw participant inputs based on split type.
+    // 6. Resolve raw participant inputs based on split type.
     const rawParticipants = this.resolveRawParticipants(input, trip.members);
 
     if (rawParticipants.length === 0) {
       throw ApiError.badRequest('At least one participant is required');
     }
 
-    // 6. Every participant must be a current trip member.
+    // 7. Every participant must be a current trip member.
     for (const p of rawParticipants) {
       if (!memberIds.has(p.userId)) {
         throw ApiError.badRequest(`Participant ${p.userId} is not a member of this trip`);
       }
     }
 
-    // 7. Payer must appear in the participant list for all split types.
+    // 8. Every payer must appear in the participant list.
     //    For EQUAL: they always owe their share.
     //    For EXACT: their exactAmountMinor may be 0 (they covered everyone).
-    //    For PERCENT / SHARES: basisPoints / shareUnits must be ≥ 1 (Zod
-    //    already enforced this at the API boundary).
-    const payerInParticipants = rawParticipants.some((p) => p.userId === input.paidByUserId);
-    if (!payerInParticipants) {
-      throw ApiError.badRequest('Payer must be included in the participant list');
+    //    For PERCENT / SHARES: basisPoints / shareUnits must be ≥ 1.
+    const participantUserIds = new Set(rawParticipants.map((p) => p.userId));
+    for (const payment of effectivePayments) {
+      if (!participantUserIds.has(payment.userId)) {
+        throw ApiError.badRequest(
+          `Payer ${payment.userId} must be included in the participant list`,
+        );
+      }
     }
 
-    // 8. Dispatch to the appropriate calculator via the registry.
+    // 9. Dispatch to the appropriate calculator via the registry.
     //    The calculator is a pure function: no DB access, no side effects.
     //    It throws with a descriptive error if inputs violate its preconditions
     //    (e.g. PERCENT basisPoints don't sum to 10 000).
+    //    Pass the primary payer ID (first payment user) for calculators that
+    //    use it for rounding remainder assignment.
+    const primaryPayerUserId = effectivePayments[0]!.userId;
     let splitResults: SplitResult[];
     try {
-      splitResults = splitRegistry.compute(splitType, input.amountMinor, rawParticipants, input.paidByUserId);
+      splitResults = splitRegistry.compute(splitType, input.amountMinor, rawParticipants, primaryPayerUserId);
     } catch (err) {
       // Calculator errors indicate invalid client input (wrong sums, missing
       // fields). Surface them as 400 Bad Request rather than 500.
@@ -110,10 +123,10 @@ export class ExpenseService {
       throw ApiError.badRequest(message);
     }
 
-    // 9. Write-time invariant: SUM(shareMinor) must equal amountMinor exactly.
-    //    The calculator is responsible for this; this assertion is the last
-    //    line of defense before the DB write. A violation here is a bug in
-    //    the calculator, not a user error — log it loudly.
+    // 10. Write-time invariant: SUM(shareMinor) must equal amountMinor exactly.
+    //     The calculator is responsible for this; this assertion is the last
+    //     line of defense before the DB write. A violation here is a bug in
+    //     the calculator, not a user error — log it loudly.
     const shareSum = splitResults.reduce((acc, s) => acc + s.shareMinor, 0);
     if (shareSum !== input.amountMinor) {
       logger.error(
@@ -131,20 +144,19 @@ export class ExpenseService {
       );
     }
 
-    // 10. Build the immutable audit snapshot for non-EQUAL splits.
+    // 11. Build the immutable audit snapshot for non-EQUAL splits.
     const splitMeta = this.buildSplitMeta(splitType, rawParticipants);
 
-    // 11. Persist. The nested-create is atomic at the Prisma level.
+    // 12. Persist. The nested-create is atomic at the Prisma level.
+    //     effectivePayments carries the canonical payment list (one or many payers).
     //     SplitResult[] maps cleanly to CreateExpenseData.shares.
-    //     Phase 2: single payer from the API maps to one ExpensePayment covering
-    //     the full amount. Phase 3 will introduce multi-payer input.
     const created = await this.expenses.create({
       tripId: input.tripId,
       title: input.title.trim(),
       amountMinor: input.amountMinor,
       category: input.category ?? ExpenseCategory.MISC,
       splitType,
-      payments: [{ userId: input.paidByUserId, contributionMinor: input.amountMinor }],
+      payments: effectivePayments,
       createdById: userId,
       spentAt: input.spentAt,
       shares: splitResults,
@@ -158,14 +170,16 @@ export class ExpenseService {
         splitType,
         amountMinor: input.amountMinor,
         participantCount: splitResults.length,
+        payerCount: effectivePayments.length,
       },
       'expense created',
     );
 
-    // 12. Notify all trip members except the payer (fire-and-forget).
+    // 13. Notify all trip members except all payers (fire-and-forget).
+    const payerUserIds = new Set(effectivePayments.map((p) => p.userId));
     const notifyUserIds = trip.members
       .map((m) => m.userId)
-      .filter((id) => id !== input.paidByUserId);
+      .filter((id) => !payerUserIds.has(id));
     if (notifyUserIds.length > 0) {
       const primaryPayerName = created.payments[0]?.user.name ?? 'Someone';
       void this.notifications.sendToUsers(notifyUserIds, {
@@ -221,10 +235,14 @@ export class ExpenseService {
     const trip = await this.trips.findDetail(tripId);
     if (trip === null) throw ApiError.notFound('Trip not found');
 
-    const [expenseRows, settlementRows] = await Promise.all([
-      this.expenses.findForBalances(tripId),
-      this.settlements.findCompletedForBalances(tripId),
-    ]);
+    // Fetch sequentially so that any settlement created concurrently is either
+    // fully included in both reads or fully absent from both. Running these in
+    // parallel (Promise.all) creates a read-skew window: the settlements query
+    // could observe a new row that was committed AFTER the expenses query,
+    // making the net-balance temporarily inconsistent. Sequential ordering is
+    // the cheapest isolation guarantee without a full REPEATABLE READ transaction.
+    const expenseRows = await this.expenses.findForBalances(tripId);
+    const settlementRows = await this.settlements.findCompletedForBalances(tripId);
 
     // Build per-user totals alongside the engine input. The balance engine
     // is entirely split-type-agnostic: it reads only shareMinor, which is
@@ -263,12 +281,9 @@ export class ExpenseService {
       0,
     );
 
-    // Build BalanceEngine-compatible input from the normalized payment rows.
-    // Phase 2 bridge: all data is single-payer, so payments[0] is always the
-    // sole payer. Phase 3 will update the balance engine to accept payments[].
     const engineExpenses = expenseRows.map((e) => ({
-      payerId: e.payments[0]?.userId ?? '',
       amountMinor: e.amountMinor,
+      payments: e.payments,
       participants: e.participants,
     }));
 
@@ -281,10 +296,12 @@ export class ExpenseService {
 
     const userById = new Map<string, User>();
     for (const m of orderedMembers) userById.set(m.userId, m.user);
-    const missing = netBalances.map((b) => b.userId).filter((id) => !userById.has(id));
-    for (const id of missing) {
-      const u = await this.users.findById(id);
-      if (u !== null) userById.set(id, u);
+    // Former members (left the trip) appear in netBalances but not in orderedMembers.
+    // Batch-fetch them in one query instead of looping N individual findById calls.
+    const missingIds = netBalances.map((b) => b.userId).filter((id) => !userById.has(id));
+    if (missingIds.length > 0) {
+      const fetchedUsers = await this.users.findManyByIds(missingIds);
+      for (const u of fetchedUsers) userById.set(u.id, u);
     }
 
     const memberBalances = toMemberBalances({
@@ -303,6 +320,29 @@ export class ExpenseService {
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
+
+  /**
+   * Resolve the canonical payments list from the request input.
+   *
+   * Phase 4 clients send payments[] directly.
+   * Legacy clients send paidByUserId; we derive a single payment covering
+   * the full amountMinor.
+   *
+   * The Zod validation layer guarantees at least one of the two is present,
+   * so no fallback error is needed here.
+   */
+  private resolveEffectivePayments(
+    input: CreateExpenseInput,
+  ): { userId: string; contributionMinor: number }[] {
+    if (input.payments !== undefined && input.payments.length > 0) {
+      return input.payments.map((p) => ({
+        userId: p.userId,
+        contributionMinor: p.contributionMinor,
+      }));
+    }
+    // Legacy path: paidByUserId guaranteed present by Zod validation.
+    return [{ userId: input.paidByUserId!, contributionMinor: input.amountMinor }];
+  }
 
   /**
    * Translate the typed CreateExpenseInput into the flat RawParticipantInput

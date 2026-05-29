@@ -11,6 +11,11 @@
  *   - CreateExpenseInput gains splitType (defaults to EQUAL when absent) and an
  *     optional participants field. Old callers that supply only participantIds
  *     continue to work unchanged.
+ *   - Phase 4: ExpenseDto now includes a canonical payments[] array alongside
+ *     the deprecated paidBy field. New clients should read payments[]; old clients
+ *     continue to read paidBy unchanged.
+ *   - Phase 4: CreateExpenseInput accepts an optional payments[] array.
+ *     Old clients that supply only paidByUserId continue to work unchanged.
  *
  * SplitMetaDto:
  *   The `splitMeta` field on ExpenseDto is a typed discriminated union instead
@@ -108,6 +113,20 @@ export interface ExpenseParticipantDto extends UserPreviewDto {
   exactAmountMinor: number | null;
 }
 
+// ── Payment ───────────────────────────────────────────────────────────────────
+
+/**
+ * Phase 4 canonical payment entry in the expense response.
+ *
+ * Represents one contributor and how much they paid toward the expense.
+ * Replaces the deprecated single `paidBy` field for multi-payer awareness.
+ */
+export interface ExpensePaymentDto {
+  user: UserPreviewDto;
+  /** Amount paid by this user in minor units. Always > 0. */
+  contributionMinor: number;
+}
+
 export interface ExpenseDto {
   id: string;
   tripId: string;
@@ -120,7 +139,24 @@ export interface ExpenseDto {
    * historical expenses and should treat unknown values as non-EQUAL display.
    */
   splitType: ExpenseSplitType;
+  /**
+   * @deprecated Use `payments` instead.
+   * Kept for backward compatibility. Derived from payments[0] (first payer by
+   * creation order).
+   *
+   * Phase 5 removal target: once all active client versions read `payments[]`
+   * (i.e., min supported build ≥ the Phase 4 Flutter release), delete this field
+   * from the DTO, the mapper (expense.mapper.ts toExpenseDto), and the schema.
+   * The primaryPayment null-guard in the mapper can be inlined into a
+   * `payments.length === 0` invariant check at that point.
+   */
   paidBy: UserPreviewDto;
+  /**
+   * Phase 4 canonical payment list. Always non-empty.
+   * Sum of contributionMinor across all entries equals amountMinor.
+   * For single-payer expenses, contains exactly one entry.
+   */
+  payments: ExpensePaymentDto[];
   participants: ExpenseParticipantDto[];
   /**
    * Immutable audit snapshot of the raw split intent supplied by the client.
@@ -168,11 +204,41 @@ export interface BalanceSummaryDto {
 
 // ── Input types ───────────────────────────────────────────────────────────────
 
+/**
+ * Phase 4 canonical payment input entry.
+ * Represents one contributor and how much they are paying toward the expense.
+ */
+export interface ExpensePaymentInputDto {
+  userId: string;
+  /** Amount paid by this user in minor units. Must be > 0. */
+  contributionMinor: number;
+}
+
 export interface CreateExpenseInput {
   tripId: string;
   title: string;
   amountMinor: number;
-  paidByUserId: string;
+  /**
+   * @deprecated Prefer `payments` for new clients.
+   * Backward-compat single-payer ID. When present and `payments` is absent,
+   * the service derives a single payment entry covering the full amountMinor.
+   * Must be absent or undefined when `payments` is provided.
+   *
+   * Phase 5 removal target: drop from CreateExpenseInput, Zod baseExpenseFields,
+   * service.resolveEffectivePayments() legacy path, and controller toCreateExpenseInput()
+   * once all clients on ≥ Phase 4 builds stop sending this field.
+   */
+  paidByUserId?: string;
+  /**
+   * Phase 4 canonical payment list. Optional for backward compat.
+   * When provided:
+   *   - At least one entry required.
+   *   - All contributionMinor values must be > 0.
+   *   - No duplicate userIds.
+   *   - SUM(contributionMinor) must equal amountMinor.
+   * When absent, paidByUserId must be provided instead.
+   */
+  payments?: readonly ExpensePaymentInputDto[];
   /**
    * Defaults to EQUAL for backward compatibility with old clients that
    * do not send this field. Non-EQUAL types are gated by the

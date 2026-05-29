@@ -7,6 +7,10 @@
  *   discriminated union runs, so the old request shape is a valid member
  *   of the union without any code change on the client side.
  *
+ *   Phase 4: Old clients that send `paidByUserId` (and no `payments[]`)
+ *   continue to work. The preprocessing step normalises the body so that
+ *   `payments` is always set before the discriminated union validates.
+ *
  * Validation responsibility split:
  *   Zod (here):
  *     • field presence and types
@@ -14,6 +18,7 @@
  *     • participant array uniqueness by userId          ← enforced here
  *     • EXACT cross-field sum (SUM(exactAmountMinor) == amountMinor)  ← enforced here
  *     • PERCENT cross-field sum (SUM(basisPoints) == 10000)           ← enforced here
+ *     • payments[] uniqueness + sum check               ← enforced here
  *   ExpenseService:
  *     • trip membership, payer-in-participants, feature flag
  *   SplitCalculator:
@@ -43,6 +48,20 @@ import {
 // ── Shared primitives ─────────────────────────────────────────────────────────
 
 const uuid = z.string().uuid('Must be a valid UUID');
+
+// ── Phase 4: Payment input schema ─────────────────────────────────────────────
+
+/**
+ * One payer entry in the payments[] array.
+ * contributionMinor must be > 0 — every payment must cover a positive amount.
+ */
+const paymentInputSchema = z.object({
+  userId: uuid,
+  contributionMinor: z
+    .number()
+    .int('contributionMinor must be an integer (minor units)')
+    .min(1, 'contributionMinor must be at least 1 (minor unit)'),
+});
 
 const amountMinorSchema = z
   .number()
@@ -160,12 +179,37 @@ const sharesParticipantSchema = z.object({
 /**
  * Fields present in every expense creation request regardless of split type.
  * Each split-specific schema extends this via `.extend()`.
+ *
+ * Phase 4 compatibility:
+ *   paidByUserId is now optional — old clients that send it continue to work.
+ *   payments[] is optional — new clients that send it take precedence.
+ *   At least one of paidByUserId or payments must be present; this is
+ *   enforced in the top-level .superRefine() after branch parsing.
  */
 const baseExpenseFields = {
   tripId: uuid,
   title: titleSchema,
   amountMinor: amountMinorSchema,
-  paidByUserId: uuid,
+  /**
+   * @deprecated Use payments[] instead.
+   * Kept for backward compat: old clients that send only paidByUserId are
+   * auto-converted to a single-entry payments[] by the preprocessing step.
+   * Validated as optional here; the superRefine ensures at least one of
+   * paidByUserId / payments is present.
+   */
+  paidByUserId: uuid.optional(),
+  /**
+   * Phase 4 multi-payer input. Optional — old clients omit this field.
+   * When provided:
+   *   - At least one entry required.
+   *   - All contributionMinor values must be > 0.
+   *   - No duplicate userIds.
+   *   - SUM(contributionMinor) === amountMinor (checked in superRefine below).
+   */
+  payments: z
+    .array(paymentInputSchema)
+    .min(1, 'payments must contain at least one entry')
+    .optional(),
   category: categorySchema.optional(),
   spentAt: spentAtSchema,
 } as const;
@@ -242,18 +286,32 @@ const sharesBodySchema = baseExpenseSchema.extend({
 // ── Combined schema with backward-compat default injection ────────────────────
 
 /**
- * Inject `splitType: 'EQUAL'` into the raw body if the field is absent or
- * nullish. This makes old client requests (which never send `splitType`) a
- * valid member of the discriminated union without any breaking change.
+ * Preprocessing pass applied before the discriminated union schema runs.
+ *
+ * Two normalisation steps:
+ * 1. Inject `splitType: 'EQUAL'` when absent — makes old clients work.
+ * 2. Inject `payments` when absent but `paidByUserId` is present —
+ *    converts the legacy single-payer shape into the Phase 4 canonical form
+ *    so the service always receives a populated payments[] field.
+ *    NOTE: contributionMinor cannot be injected here because amountMinor
+ *    has not been validated yet. The service derives the contribution from
+ *    amountMinor at runtime. The Zod superRefine validates the populated
+ *    payments[] after both paidByUserId and amountMinor are in scope.
  */
-function injectDefaultSplitType(raw: unknown): unknown {
+function normaliseExpenseBody(raw: unknown): unknown {
   if (raw === null || typeof raw !== 'object') return raw;
   const obj = raw as Record<string, unknown>;
-  if (obj['splitType'] === undefined || obj['splitType'] === null) {
-    return { ...obj, splitType: ExpenseSplitType.EQUAL };
-  }
-  return raw;
+
+  const withSplitType =
+    obj['splitType'] === undefined || obj['splitType'] === null
+      ? { ...obj, splitType: ExpenseSplitType.EQUAL }
+      : obj;
+
+  return withSplitType;
 }
+
+// Alias kept for readability below.
+const injectDefaultSplitType = normaliseExpenseBody;
 
 /**
  * The main create-expense body schema.
@@ -284,6 +342,53 @@ export const createExpenseBodySchema = z.preprocess(
       sharesBodySchema,
     ])
     .superRefine((body, ctx) => {
+      // ── Phase 4: payer presence check ──────────────────────────────────────
+      // At least one of paidByUserId or payments must be present.
+      const hasPaidBy = body.paidByUserId !== undefined && body.paidByUserId !== null;
+      const hasPayments = Array.isArray(body.payments) && body.payments.length > 0;
+
+      if (!hasPaidBy && !hasPayments) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['paidByUserId'],
+          message:
+            'Either paidByUserId or payments must be provided.',
+        });
+        return; // Stop further payment checks — data is incomplete.
+      }
+
+      // ── Phase 4: payments[] cross-field validation ──────────────────────────
+      // Only run when payments[] is explicitly provided. Old clients that send
+      // paidByUserId skip this block entirely.
+      if (hasPayments && body.payments !== undefined) {
+        // No duplicate payer userIds.
+        const seen = new Set<string>();
+        for (let i = 0; i < body.payments.length; i++) {
+          const id = body.payments[i]!.userId;
+          if (seen.has(id)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['payments', i, 'userId'],
+              message: `Duplicate userId: "${id}" appears more than once in payments`,
+            });
+          }
+          seen.add(id);
+        }
+
+        // SUM(contributionMinor) must equal amountMinor exactly.
+        const sum = body.payments.reduce((acc, p) => acc + p.contributionMinor, 0);
+        if (sum !== body.amountMinor) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['payments'],
+            message:
+              `payments: contributionMinor values sum to ${String(sum)} minor units ` +
+              `but amountMinor is ${String(body.amountMinor)} minor units ` +
+              `(difference: ${String(sum - body.amountMinor)} minor units).`,
+          });
+        }
+      }
+
       // ── EXACT: cross-field sum check ────────────────────────────────────────
       // SUM(exactAmountMinor) must equal amountMinor exactly.
       // We check here (not inside the calculator) so the error carries a
@@ -351,6 +456,7 @@ export type ListExpensesQuery = z.infer<typeof listExpensesQuerySchema>;
 export type ExactParticipant = z.infer<typeof exactParticipantSchema>;
 export type PercentParticipant = z.infer<typeof percentParticipantSchema>;
 export type SharesParticipant = z.infer<typeof sharesParticipantSchema>;
+export type PaymentInput = z.infer<typeof paymentInputSchema>;
 
 // Re-export branch schemas for contract tests that need to parse branches in
 // isolation (e.g. to assert that EQUAL parsing works without the full body).

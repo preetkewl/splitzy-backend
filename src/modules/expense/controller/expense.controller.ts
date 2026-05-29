@@ -69,14 +69,21 @@ export class ExpenseController {
  * requires us to narrow the union before accessing split-specific fields
  * (participantIds / participants) to avoid compile errors. We do this with a
  * switch rather than casting so TypeScript can verify exhaustiveness.
+ *
+ * Phase 4: both `paidByUserId` (legacy) and `payments[]` (new) are passed
+ * through to the service, which resolves the effective payment list from
+ * whichever is present.
  */
 function toCreateExpenseInput(body: CreateExpenseBody): CreateExpenseInput {
   // Common fields present on every union member.
+  // paidByUserId and payments are both optional on the validated body; the
+  // service resolveEffectivePayments() handles the either-or logic.
   const base = {
     tripId: body.tripId,
     title: body.title,
     amountMinor: body.amountMinor,
     paidByUserId: body.paidByUserId,
+    payments: body.payments,
     category: body.category,
     spentAt: body.spentAt,
   } as const;
