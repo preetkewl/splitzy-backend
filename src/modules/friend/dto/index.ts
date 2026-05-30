@@ -74,21 +74,11 @@ export interface FriendRequestListDto {
 // ── Contacts sync ─────────────────────────────────────────────────────────────
 
 /**
- * Relationship from the viewer's perspective when discovering via contacts.
- * Uses same string values as FriendSearchRelationship for DTO compatibility.
+ * One matched user returned by POST /friends/contacts/sync. Structurally
+ * identical to a search result — same shape, same relationship enum,
+ * same requestId hint — so we alias it rather than duplicate the type.
  */
-export type ContactRelationship =
-  | 'none'
-  | 'friend'
-  | 'request_outgoing'
-  | 'request_incoming';
-
-/** One matched user returned by POST /friends/contacts/sync. */
-export interface ContactMatchDto extends FriendUserPreviewDto {
-  phone: string;
-  relationship: ContactRelationship;
-  requestId: string | null;
-}
+export type ContactMatchDto = FriendSearchResultDto;
 
 export interface ContactSyncResultDto {
   matches: ContactMatchDto[];

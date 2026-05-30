@@ -4,6 +4,7 @@ import { ApiResponse } from '../../../core/api-response.js';
 import { asyncHandler } from '../../../core/async-handler.js';
 import type { FriendService } from '../service/friend.service.js';
 import type {
+  FriendUserIdParam,
   ListFriendsQuery,
   RequestIdParam,
   SearchQuery,
@@ -63,11 +64,27 @@ export class FriendController {
     },
   );
 
+  cancelRequest = asyncHandler(
+    async (req: WithParams<RequestIdParam>, res: Response) => {
+      const userId = this.requireUserId(req);
+      const result = await this.friends.cancelRequest(userId, req.params.requestId);
+      return ApiResponse.ok(res, result);
+    },
+  );
+
   listRequests = asyncHandler(async (req: Request, res: Response) => {
     const userId = this.requireUserId(req);
     const result = await this.friends.listRequests(userId);
     return ApiResponse.ok(res, result);
   });
+
+  removeFriend = asyncHandler(
+    async (req: WithParams<FriendUserIdParam>, res: Response) => {
+      const userId = this.requireUserId(req);
+      await this.friends.removeFriend(userId, req.params.friendUserId);
+      return ApiResponse.ok(res, null);
+    },
+  );
 
   syncContacts = asyncHandler(async (req: WithBody<SyncContactsBody>, res: Response) => {
     const userId = this.requireUserId(req);

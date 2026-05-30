@@ -37,12 +37,28 @@ export interface IFriendRepository {
   countFriends(userId: string): Promise<number>;
   findFriendship(userIdA: string, userIdB: string): Promise<Friendship | null>;
   createFriendship(userIdA: string, userIdB: string): Promise<Friendship>;
+  removeFriendship(userIdA: string, userIdB: string): Promise<void>;
 
   // Requests
-  findActiveRequestBetween(
-    userA: string,
-    userB: string,
-  ): Promise<FriendRequest | null>;
+  /**
+   * Batch lookup: return every accepted friendship between `viewerId`
+   * and any of `otherIds`. Used by the shared decorator to attach
+   * "friend / pending / none" relationship state to a list of users
+   * without N+1 queries.
+   */
+  findFriendshipsBetween(
+    viewerId: string,
+    otherIds: string[],
+  ): Promise<Friendship[]>;
+  /**
+   * Batch lookup: return every PENDING request where `viewerId` is on
+   * one side and the other side is in `otherIds`. Direction-agnostic;
+   * callers inspect `fromUserId`/`toUserId` to derive outgoing vs incoming.
+   */
+  findActiveRequestsBetween(
+    viewerId: string,
+    otherIds: string[],
+  ): Promise<FriendRequest[]>;
   /**
    * Returns the row stored at the (fromUserId, toUserId) UNIQUE index —
    * regardless of status. Used by `sendRequest` to decide between
@@ -71,6 +87,8 @@ export interface IFriendRepository {
     requestId: string,
   ): Promise<{ request: FriendRequestWithUsers; friendship: Friendship }>;
   rejectRequest(requestId: string): Promise<FriendRequestWithUsers>;
+  /** Sender-side cancellation. Sets status=CANCELLED, respondedAt=now. */
+  cancelRequest(requestId: string): Promise<FriendRequestWithUsers>;
   listIncoming(userId: string): Promise<FriendRequestWithUsers[]>;
   listOutgoing(userId: string): Promise<FriendRequestWithUsers[]>;
 
@@ -125,18 +143,41 @@ export class FriendRepository implements IFriendRepository {
     return this.prisma.friendship.create({ data: pair });
   }
 
+  async removeFriendship(userIdA: string, userIdB: string): Promise<void> {
+    const pair = canonicalFriendshipPair(userIdA, userIdB);
+    await this.prisma.friendship.deleteMany({
+      where: { userAId: pair.userAId, userBId: pair.userBId },
+    });
+  }
+
   // ── Requests ─────────────────────────────────────────────────────────────
 
-  async findActiveRequestBetween(
-    userA: string,
-    userB: string,
-  ): Promise<FriendRequest | null> {
-    return this.prisma.friendRequest.findFirst({
+  async findFriendshipsBetween(
+    viewerId: string,
+    otherIds: string[],
+  ): Promise<Friendship[]> {
+    if (otherIds.length === 0) return [];
+    return this.prisma.friendship.findMany({
+      where: {
+        OR: [
+          { userAId: viewerId, userBId: { in: otherIds } },
+          { userBId: viewerId, userAId: { in: otherIds } },
+        ],
+      },
+    });
+  }
+
+  async findActiveRequestsBetween(
+    viewerId: string,
+    otherIds: string[],
+  ): Promise<FriendRequest[]> {
+    if (otherIds.length === 0) return [];
+    return this.prisma.friendRequest.findMany({
       where: {
         status: FriendRequestStatus.PENDING,
         OR: [
-          { fromUserId: userA, toUserId: userB },
-          { fromUserId: userB, toUserId: userA },
+          { fromUserId: viewerId, toUserId: { in: otherIds } },
+          { toUserId: viewerId, fromUserId: { in: otherIds } },
         ],
       },
     });
@@ -225,6 +266,17 @@ export class FriendRepository implements IFriendRepository {
       where: { id: requestId },
       data: {
         status: FriendRequestStatus.DECLINED,
+        respondedAt: new Date(),
+      },
+      include: requestInclude,
+    });
+  }
+
+  cancelRequest(requestId: string): Promise<FriendRequestWithUsers> {
+    return this.prisma.friendRequest.update({
+      where: { id: requestId },
+      data: {
+        status: FriendRequestStatus.CANCELLED,
         respondedAt: new Date(),
       },
       include: requestInclude,

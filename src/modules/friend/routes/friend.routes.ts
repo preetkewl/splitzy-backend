@@ -3,6 +3,7 @@ import { requireAuth, validateRequest } from '../../../middlewares/index.js';
 import type { TokenService } from '../../auth/service/token.service.js';
 import type { FriendController } from '../controller/friend.controller.js';
 import {
+  friendUserIdParamSchema,
   listFriendsQuerySchema,
   requestIdParamSchema,
   searchQuerySchema,
@@ -28,6 +29,11 @@ export function createFriendRouter(deps: FriendRouterDeps): Router {
   router.use(auth);
 
   router.get('/', validateRequest({ query: listFriendsQuerySchema }), deps.controller.list);
+  router.delete(
+    '/:friendUserId',
+    validateRequest({ params: friendUserIdParamSchema }),
+    deps.controller.removeFriend,
+  );
   router.get('/search', validateRequest({ query: searchQuerySchema }), deps.controller.search);
 
   router.get('/requests', deps.controller.listRequests);
@@ -46,6 +52,11 @@ export function createFriendRouter(deps: FriendRouterDeps): Router {
     '/request/:requestId/reject',
     validateRequest({ params: requestIdParamSchema }),
     deps.controller.rejectRequest,
+  );
+  router.post(
+    '/request/:requestId/cancel',
+    validateRequest({ params: requestIdParamSchema }),
+    deps.controller.cancelRequest,
   );
 
   router.post(

@@ -650,23 +650,43 @@ export class FakeFriendRepository implements IFriendRepository {
     return row;
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async removeFriendship(userIdA: string, userIdB: string): Promise<void> {
+    const pair = canonicalFriendshipPair(userIdA, userIdB);
+    this.store.friendships.delete(friendshipKey(pair.userAId, pair.userBId));
+  }
+
   // ── Requests ─────────────────────────────────────────────────────────────
 
   // eslint-disable-next-line @typescript-eslint/require-await
-  async findActiveRequestBetween(
-    userA: string,
-    userB: string,
-  ): Promise<FriendRequest | null> {
+  async findFriendshipsBetween(
+    viewerId: string,
+    otherIds: string[],
+  ): Promise<Friendship[]> {
+    if (otherIds.length === 0) return [];
+    const others = new Set(otherIds);
+    const out: Friendship[] = [];
+    for (const f of this.store.friendships.values()) {
+      if (f.userAId === viewerId && others.has(f.userBId)) out.push(f);
+      else if (f.userBId === viewerId && others.has(f.userAId)) out.push(f);
+    }
+    return out;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async findActiveRequestsBetween(
+    viewerId: string,
+    otherIds: string[],
+  ): Promise<FriendRequest[]> {
+    if (otherIds.length === 0) return [];
+    const others = new Set(otherIds);
+    const out: FriendRequest[] = [];
     for (const r of this.store.friendRequests.values()) {
       if (r.status !== FriendRequestStatus.PENDING) continue;
-      if (
-        (r.fromUserId === userA && r.toUserId === userB) ||
-        (r.fromUserId === userB && r.toUserId === userA)
-      ) {
-        return r;
-      }
+      if (r.fromUserId === viewerId && others.has(r.toUserId)) out.push(r);
+      else if (r.toUserId === viewerId && others.has(r.fromUserId)) out.push(r);
     }
-    return null;
+    return out;
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await
@@ -762,6 +782,20 @@ export class FakeFriendRepository implements IFriendRepository {
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await
+  async cancelRequest(requestId: string): Promise<FriendRequestWithUsers> {
+    const cur = this.store.friendRequests.get(requestId);
+    if (cur === undefined) throw new Error('request not found');
+    const next: FriendRequest = {
+      ...cur,
+      status: FriendRequestStatus.CANCELLED,
+      respondedAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.store.friendRequests.set(requestId, next);
+    return this.hydrateRequest(next);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
   async listIncoming(userId: string): Promise<FriendRequestWithUsers[]> {
     const rows = Array.from(this.store.friendRequests.values()).filter(
       (r) => r.toUserId === userId && r.status === FriendRequestStatus.PENDING,
@@ -793,6 +827,17 @@ export class FakeFriendRepository implements IFriendRepository {
       if (results.length >= filter.limit) break;
     }
     results.sort((a, b) => a.handle.localeCompare(b.handle));
+    return results;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async findUsersByPhoneSuffixes(suffixes: string[], excludeUserId: string): Promise<User[]> {
+    const results: User[] = [];
+    for (const u of this.store.users.values()) {
+      if (u.id === excludeUserId || u.deletedAt !== null || u.phone === null) continue;
+      if (suffixes.some((s) => u.phone!.endsWith(s))) results.push(u);
+      if (results.length >= 200) break;
+    }
     return results;
   }
 }

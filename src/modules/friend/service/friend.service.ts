@@ -8,7 +8,6 @@ import type { IUserRepository } from '../../auth/repository/user.repository.js';
 import type { NotificationService } from '../../notification/service/notification.service.js';
 import { SEARCH_DEFAULT_LIMIT } from '../constants.js';
 import type {
-  ContactMatchDto,
   ContactSyncResultDto,
   FriendDto,
   FriendRequestDto,
@@ -73,42 +72,53 @@ export class FriendService {
       excludeUserId: viewerUserId,
       limit: limit ?? SEARCH_DEFAULT_LIMIT,
     });
-    if (users.length === 0) return [];
-
-    // For each match, decorate with relationship state. We resolve each
-    // pair in parallel — bounded by SEARCH_MAX_LIMIT (50) so the fan-out
-    // is harmless. (No N+1 risk: small fixed cap, indexed lookups.)
-    return Promise.all(users.map((u) => this.decorateSearchResult(viewerUserId, u)));
+    return this.decorateUsers(viewerUserId, users);
   }
 
-  private async decorateSearchResult(
+  /**
+   * Attach the viewer's current relationship (friend / pending / none)
+   * to every user in `others` using **two batched queries total** —
+   * regardless of result-set size. Replaces the per-row N+1 fan-out
+   * that the older `decorateSearchResult`/`decorateContactResult`
+   * implementations used.
+   */
+  private async decorateUsers(
     viewerUserId: string,
-    other: User,
-  ): Promise<FriendSearchResultDto> {
-    const friendship = await this.friends.findFriendship(viewerUserId, other.id);
-    if (friendship !== null) {
-      return {
-        ...toFriendUserPreview(other),
-        phone: other.phone,
-        relationship: 'friend',
-        requestId: null,
-      };
+    others: User[],
+  ): Promise<FriendSearchResultDto[]> {
+    if (others.length === 0) return [];
+    const ids = others.map((u) => u.id);
+    const [friendships, requests] = await Promise.all([
+      this.friends.findFriendshipsBetween(viewerUserId, ids),
+      this.friends.findActiveRequestsBetween(viewerUserId, ids),
+    ]);
+
+    const friendIds = new Set<string>();
+    for (const f of friendships) {
+      friendIds.add(f.userAId === viewerUserId ? f.userBId : f.userAId);
     }
-    const request = await this.friends.findActiveRequestBetween(viewerUserId, other.id);
-    if (request !== null) {
-      return {
-        ...toFriendUserPreview(other),
-        phone: other.phone,
-        relationship: request.fromUserId === viewerUserId ? 'request_outgoing' : 'request_incoming',
-        requestId: request.id,
-      };
+    const requestByOther = new Map<string, { id: string; fromMe: boolean }>();
+    for (const r of requests) {
+      const otherId = r.fromUserId === viewerUserId ? r.toUserId : r.fromUserId;
+      requestByOther.set(otherId, { id: r.id, fromMe: r.fromUserId === viewerUserId });
     }
-    return {
-      ...toFriendUserPreview(other),
-      phone: other.phone,
-      relationship: 'none',
-      requestId: null,
-    };
+
+    return others.map((u) => {
+      const preview = toFriendUserPreview(u);
+      if (friendIds.has(u.id)) {
+        return { ...preview, phone: u.phone, relationship: 'friend', requestId: null };
+      }
+      const req = requestByOther.get(u.id);
+      if (req !== undefined) {
+        return {
+          ...preview,
+          phone: u.phone,
+          relationship: req.fromMe ? 'request_outgoing' : 'request_incoming',
+          requestId: req.id,
+        };
+      }
+      return { ...preview, phone: u.phone, relationship: 'none', requestId: null };
+    });
   }
 
   // ── send request ──────────────────────────────────────────────────────────
@@ -240,6 +250,46 @@ export class FriendService {
     return toFriendRequestDto(updated, userId);
   }
 
+  // ── cancel ────────────────────────────────────────────────────────────────
+
+  /**
+   * Sender-side cancellation. Mirror of `rejectRequest` but only the
+   * `fromUser` may invoke it, and the resulting status is CANCELLED
+   * (audit-distinct from DECLINED — so the recipient can tell the
+   * difference if we ever surface request history).
+   */
+  async cancelRequest(userId: string, requestId: string): Promise<FriendRequestDto> {
+    const request = await this.friends.findRequestById(requestId);
+    if (request === null) throw ApiError.notFound('Friend request not found');
+    if (request.fromUserId !== userId) {
+      throw ApiError.forbidden('Only the sender can cancel this request');
+    }
+    if (request.status !== FriendRequestStatus.PENDING) {
+      throw new ApiError(
+        HTTP.CONFLICT,
+        ERROR_CODES.CONFLICT,
+        `Request is already ${request.status.toLowerCase()}`,
+      );
+    }
+    const updated = await this.friends.cancelRequest(requestId);
+    logger.info({ requestId, by: userId }, 'friend request cancelled');
+    return toFriendRequestDto(updated, userId);
+  }
+
+  // ── remove friend ────────────────────────────────────────────────────────
+
+  async removeFriend(userId: string, friendUserId: string): Promise<void> {
+    if (userId === friendUserId) {
+      throw ApiError.badRequest('Cannot remove yourself');
+    }
+    const friendship = await this.friends.findFriendship(userId, friendUserId);
+    if (friendship === null) {
+      throw ApiError.notFound('Friendship not found');
+    }
+    await this.friends.removeFriendship(userId, friendUserId);
+    logger.info({ userId, friendUserId }, 'friendship removed');
+  }
+
   // ── contacts sync ─────────────────────────────────────────────────────────
 
   /**
@@ -259,42 +309,7 @@ export class FriendService {
     if (suffixes.length === 0) return { matches: [] };
 
     const users = await this.friends.findUsersByPhoneSuffixes(suffixes, userId);
-    if (users.length === 0) return { matches: [] };
-
-    const matches = await Promise.all(
-      users.map((u) => this.decorateContactResult(userId, u)),
-    );
-    return { matches };
-  }
-
-  private async decorateContactResult(
-    viewerUserId: string,
-    other: User,
-  ): Promise<ContactMatchDto> {
-    const friendship = await this.friends.findFriendship(viewerUserId, other.id);
-    if (friendship !== null) {
-      return {
-        ...toFriendUserPreview(other),
-        phone: other.phone!,
-        relationship: 'friend',
-        requestId: null,
-      };
-    }
-    const request = await this.friends.findActiveRequestBetween(viewerUserId, other.id);
-    if (request !== null) {
-      return {
-        ...toFriendUserPreview(other),
-        phone: other.phone!,
-        relationship: request.fromUserId === viewerUserId ? 'request_outgoing' : 'request_incoming',
-        requestId: request.id,
-      };
-    }
-    return {
-      ...toFriendUserPreview(other),
-      phone: other.phone!,
-      relationship: 'none',
-      requestId: null,
-    };
+    return { matches: await this.decorateUsers(userId, users) };
   }
 
   // ── list requests ─────────────────────────────────────────────────────────

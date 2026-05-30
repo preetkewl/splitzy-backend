@@ -37,6 +37,10 @@ export const sendRequestBodySchema = z.object({
   message: z.string().max(280).nullable().optional(),
 });
 
+export const friendUserIdParamSchema = z.object({
+  friendUserId: uuid,
+});
+
 export const syncContactsBodySchema = z.object({
   phones: z
     .array(z.string().max(30))
@@ -45,6 +49,7 @@ export const syncContactsBodySchema = z.object({
 });
 
 export type RequestIdParam = z.infer<typeof requestIdParamSchema>;
+export type FriendUserIdParam = z.infer<typeof friendUserIdParamSchema>;
 export type SearchQuery = z.infer<typeof searchQuerySchema>;
 export type ListFriendsQuery = z.infer<typeof listFriendsQuerySchema>;
 export type SendRequestBody = z.infer<typeof sendRequestBodySchema>;
