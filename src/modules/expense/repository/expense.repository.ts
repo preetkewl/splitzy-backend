@@ -88,6 +88,16 @@ export interface IExpenseRepository {
    * are selected — the engine never reads basisPoints / shareUnits / exactAmountMinor.
    */
   findForBalances(tripId: string): Promise<ExpenseAggregateRow[]>;
+  /**
+   * Dashboard fan-out collapse: one query for a single viewer's paid/share
+   * totals across MANY trips. Selects only the viewer's own payment and
+   * participant rows (nested `where: { userId }`). Returns a map keyed by
+   * tripId; trips with no viewer activity are absent (treat as zeroes).
+   */
+  findViewerTotalsByTrip(
+    tripIds: readonly string[],
+    userId: string,
+  ): Promise<Map<string, { paidMinor: number; shareMinor: number }>>;
   softDelete(expenseId: string): Promise<Expense>;
 }
 
@@ -215,6 +225,34 @@ export class ExpenseRepository implements IExpenseRepository {
       payments: r.payments,
       participants: r.participants,
     }));
+  }
+
+  async findViewerTotalsByTrip(
+    tripIds: readonly string[],
+    userId: string,
+  ): Promise<Map<string, { paidMinor: number; shareMinor: number }>> {
+    const totals = new Map<string, { paidMinor: number; shareMinor: number }>();
+    if (tripIds.length === 0) return totals;
+
+    // One query for all trips. Nested `where: { userId }` narrows each
+    // expense's payments/participants to just the viewer's rows, so most
+    // expenses carry 0–1 nested rows. deletedAt:null mirrors findForBalances.
+    const rows = await this.prisma.expense.findMany({
+      where: { tripId: { in: [...tripIds] }, ...notDeleted },
+      select: {
+        tripId: true,
+        payments: { where: { userId }, select: { contributionMinor: true } },
+        participants: { where: { userId }, select: { shareMinor: true } },
+      },
+    });
+
+    for (const r of rows) {
+      const acc = totals.get(r.tripId) ?? { paidMinor: 0, shareMinor: 0 };
+      for (const p of r.payments) acc.paidMinor += p.contributionMinor;
+      for (const p of r.participants) acc.shareMinor += p.shareMinor;
+      totals.set(r.tripId, acc);
+    }
+    return totals;
   }
 
   // ── delete ────────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ import { ApiError } from '../../../core/api-error.js';
 import { paginate, type PaginationInput } from '../../../database/helpers.js';
 import { TRIP_COVER_COLORS } from '../../../database/constants.js';
 import { logger } from '../../../utils/logger.js';
+import type { ActivityService } from '../../activity/index.js';
 import type { IExpenseRepository } from '../../expense/repository/expense.repository.js';
 import type { ISettlementRepository } from '../../settlement/repository/settlement.repository.js';
 import type {
@@ -30,6 +31,7 @@ export class TripService {
     private readonly trips: ITripRepository,
     private readonly expenseRepo: IExpenseRepository,
     private readonly settlementRepo: ISettlementRepository,
+    private readonly activity: ActivityService,
   ) {
     this.access = new TripAccess(trips);
   }
@@ -57,6 +59,17 @@ export class TripService {
       { tripId: trip.id, ownerId: userId, memberCount: trip.members.length },
       'trip created',
     );
+
+    // Activity: notify every member (creator included) that the group exists.
+    const actorName = trip.members.find((m) => m.userId === userId)?.user.name ?? 'Someone';
+    this.activity.recordGroupCreated({
+      tripId: trip.id,
+      tripName: trip.name,
+      actorId: userId,
+      actorName,
+      recipientIds: trip.members.map((m) => m.userId),
+    });
+
     return toTripDetail(trip, userId);
   }
 
@@ -117,6 +130,22 @@ export class TripService {
       throw ApiError.badRequest('One or more userIds reference users that do not exist');
     }
     const rows = await this.trips.addMembers(tripId, targetIds);
+
+    // Activity: tell every current member (actor included) who was added.
+    // One read for the full member list + trip name + actor name.
+    const detail = await this.trips.findDetail(tripId);
+    if (detail !== null) {
+      const actorName = detail.members.find((m) => m.userId === userId)?.user.name ?? 'Someone';
+      this.activity.recordMemberAdded({
+        tripId,
+        tripName: detail.name,
+        actorId: userId,
+        actorName,
+        recipientIds: detail.members.map((m) => m.userId),
+        addedNames: rows.map((r) => r.user.name),
+      });
+    }
+
     return rows.map(toMember);
   }
 

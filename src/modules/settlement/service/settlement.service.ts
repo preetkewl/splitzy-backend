@@ -2,6 +2,7 @@ import { SettlementMethod } from '@prisma/client';
 import { ApiError } from '../../../core/api-error.js';
 import { paginate, type PaginationInput } from '../../../database/helpers.js';
 import { logger } from '../../../utils/logger.js';
+import type { ActivityService } from '../../activity/index.js';
 import type { NotificationService } from '../../notification/service/notification.service.js';
 import type { ITripRepository } from '../../trip/repository/trip.repository.js';
 import { TripAccess } from '../../trip/service/access.js';
@@ -23,6 +24,7 @@ export class SettlementService {
     private readonly settlements: ISettlementRepository,
     private readonly trips: ITripRepository,
     private readonly notifications: NotificationService,
+    private readonly activity: ActivityService,
   ) {
     this.access = new TripAccess(trips);
   }
@@ -81,6 +83,20 @@ export class SettlementService {
       body: `${created.fromUser.name} settled up with you`,
       type: 'SETTLEMENT_RECEIVED',
       data: { tripId: input.tripId, settlementId: created.id },
+    });
+
+    // Record activity for both parties (fire-and-forget). Metadata carries
+    // both names/ids so each side renders its own perspective.
+    this.activity.recordSettlementCompleted({
+      tripId: input.tripId,
+      tripName: trip.name,
+      settlementId: created.id,
+      amountMinor: created.amountMinor,
+      actorId: userId,
+      fromUserId: created.fromUserId,
+      fromName: created.fromUser.name,
+      toUserId: created.toUserId,
+      toName: created.toUser.name,
     });
 
     return toSettlementDto(created);

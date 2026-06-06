@@ -118,6 +118,34 @@ export const BalanceEngine = {
   },
 
   /**
+   * Scalar net for a SINGLE user, from that user's own pre-summed totals.
+   *
+   * This is the per-user closed form of [computeNetBalances] — because each
+   * user's net depends only on their own rows, a user's net is independent of
+   * everyone else's. The dashboard endpoint exploits this to compute one number
+   * per trip from cheap viewer-filtered aggregates, instead of materialising
+   * the full member matrix.
+   *
+   *   net = paidMinor − shareMinor + settledOutMinor − settledInMinor
+   *
+   * `dashboard-parity` (smoke test) asserts this equals
+   * `computeNetBalances(...)[user].netMinor` for the same data, so the two
+   * code paths cannot drift.
+   */
+  userNet(totals: {
+    /** SUM(contributionMinor) over this user's payments. */
+    paidMinor: number;
+    /** SUM(shareMinor) over this user's participant rows. */
+    shareMinor: number;
+    /** SUM(amountMinor) over completed settlements this user SENT (fromUser). */
+    settledOutMinor: number;
+    /** SUM(amountMinor) over completed settlements this user RECEIVED (toUser). */
+    settledInMinor: number;
+  }): number {
+    return totals.paidMinor - totals.shareMinor + totals.settledOutMinor - totals.settledInMinor;
+  },
+
+  /**
    * Compute per-user net balance across all expenses and completed settlements.
    *
    * For each expense:

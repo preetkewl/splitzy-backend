@@ -105,6 +105,27 @@ enum Platform {
   IOS
 }
 
+/// V3 Activity feed event types. Append-only; adding a value requires a
+/// dedicated `ALTER TYPE … ADD VALUE` migration (enum DDL must not share a
+/// file with table DDL).
+enum ActivityType {
+  EXPENSE_ADDED
+  SETTLEMENT_COMPLETED
+  FRIEND_ACCEPTED
+  MEMBER_ADDED
+  GROUP_CREATED
+}
+
+/// The primary subject an activity points at — used for deep-linking
+/// (tap → open the entity) and analytics grouping. Distinct from `tripId`,
+/// which is the surrounding context.
+enum ActivityEntityType {
+  EXPENSE
+  SETTLEMENT
+  TRIP
+  USER
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // User & Auth
 // ──────────────────────────────────────────────────────────────────────────────
@@ -153,6 +174,8 @@ model User {
   friendshipsAsA         Friendship[]         @relation("FriendshipUserA")
   friendshipsAsB         Friendship[]         @relation("FriendshipUserB")
   deviceTokens           DeviceToken[]
+  activitiesReceived     Activity[]           @relation("ActivityRecipient")
+  activitiesActed        Activity[]           @relation("ActivityActor")
 
   @@index([deletedAt])
   @@index([name])
@@ -203,6 +226,7 @@ model Trip {
   members     TripMember[]
   expenses    Expense[]
   settlements Settlement[]
+  activities  Activity[]
 
   @@index([createdById])
   @@index([deletedAt])
@@ -541,4 +565,54 @@ model DeviceToken {
 
   @@index([userId])
   @@map("device_tokens")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Activity feed (V3)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Append-only, fan-out-on-write activity feed. ONE row per (recipient, event):
+/// an event seen by N users writes N rows. The actor is included as a recipient
+/// so the feed doubles as a personal history ("You added Dinner in Goa Trip").
+///
+/// ── DESIGN CONTRACT ────────────────────────────────────────────────────────
+///   - Immutable: rows are only ever inserted (no updates, no soft-delete).
+///     The only deletions are FK cascades when the recipient/actor/trip is
+///     hard-deleted.
+///   - `metadata` is a denormalized render snapshot (actor name, trip name,
+///     amount, title, …). The feed renders with ZERO joins and stays correct
+///     even if the source row is later edited or soft-deleted.
+///   - `entityType` + `entityId` are the deep-link/analytics target (the
+///     subject), kept OUTSIDE metadata as typed columns. `tripId` is context.
+///   - Writes are fire-and-forget from the business services (best-effort,
+///     never blocks or fails the parent write). Not an accounting ledger.
+///
+/// See migration 20260605100000_add_activity for the table DDL + index.
+model Activity {
+  id         String             @id @default(uuid()) @db.Uuid
+  /// Recipient — whose feed this row belongs to (the fan-out target).
+  userId     String             @db.Uuid
+  /// Actor — who performed the action. May equal `userId` (own-action rows).
+  actorId    String             @db.Uuid
+  type       ActivityType
+  /// Deep-link subject. `entityId` is nullable only for forward-compatibility;
+  /// all five current event types populate it.
+  entityType ActivityEntityType
+  entityId   String?            @db.Uuid
+  /// Surrounding trip context. NULL for FRIEND_ACCEPTED.
+  tripId     String?            @db.Uuid
+  /// Denormalized render snapshot. See per-type shape in the activity service.
+  metadata   Json
+  createdAt  DateTime           @default(now())
+
+  user  User  @relation("ActivityRecipient", fields: [userId], references: [id], onDelete: Cascade)
+  actor User  @relation("ActivityActor", fields: [actorId], references: [id], onDelete: Cascade)
+  trip  Trip? @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  // The single index that serves the entire feed query: filter by recipient,
+  // sort reverse-chronologically, keyset-paginate on (createdAt, id).
+  @@index([userId, createdAt(sort: Desc), id])
+  // Keeps trip hard-delete cascade from sequential-scanning this table.
+  @@index([tripId])
+  @@map("activities")
 }

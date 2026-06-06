@@ -10,6 +10,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type {
+  Activity,
   DeviceToken,
   Expense,
   ExpenseParticipant,
@@ -47,6 +48,8 @@ import type {
   IFriendRepository,
   SearchFilter,
 } from '../../src/modules/friend/repository/friend.repository.js';
+import { ActivityService } from '../../src/modules/activity/index.js';
+import type { ActivityRepository } from '../../src/modules/activity/index.js';
 import type { IDeviceTokenRepository } from '../../src/modules/notification/repository/device-token.repository.js';
 import { NotificationService } from '../../src/modules/notification/service/notification.service.js';
 import type { SettlementWithUsers } from '../../src/modules/settlement/mapper/settlement.mapper.js';
@@ -567,6 +570,27 @@ export class FakeExpenseRepository implements IExpenseRepository {
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await
+  async findViewerTotalsByTrip(
+    tripIds: readonly string[],
+    userId: string,
+  ): Promise<Map<string, { paidMinor: number; shareMinor: number }>> {
+    const ids = new Set(tripIds);
+    const totals = new Map<string, { paidMinor: number; shareMinor: number }>();
+    for (const e of this.store.expenses.values()) {
+      if (e.deletedAt !== null || !ids.has(e.tripId)) continue;
+      const acc = totals.get(e.tripId) ?? { paidMinor: 0, shareMinor: 0 };
+      for (const p of this.store.expensePayments.values()) {
+        if (p.expenseId === e.id && p.userId === userId) acc.paidMinor += p.contributionMinor;
+      }
+      for (const p of this.store.expenseParticipants.values()) {
+        if (p.expenseId === e.id && p.userId === userId) acc.shareMinor += p.shareMinor;
+      }
+      totals.set(e.tripId, acc);
+    }
+    return totals;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
   async softDelete(expenseId: string): Promise<Expense> {
     const cur = this.store.expenses.get(expenseId);
     if (cur === undefined) throw new Error('expense not found');
@@ -796,6 +820,13 @@ export class FakeFriendRepository implements IFriendRepository {
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await
+  async countPendingIncoming(userId: string): Promise<number> {
+    return Array.from(this.store.friendRequests.values()).filter(
+      (r) => r.toUserId === userId && r.status === FriendRequestStatus.PENDING,
+    ).length;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
   async listIncoming(userId: string): Promise<FriendRequestWithUsers[]> {
     const rows = Array.from(this.store.friendRequests.values()).filter(
       (r) => r.toUserId === userId && r.status === FriendRequestStatus.PENDING,
@@ -911,6 +942,24 @@ export class FakeSettlementRepository implements ISettlementRepository {
       amountMinor: r.amountMinor,
     }));
   }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async findViewerTotalsByTrip(
+    tripIds: readonly string[],
+    userId: string,
+  ): Promise<Map<string, { settledOutMinor: number; settledInMinor: number }>> {
+    const ids = new Set(tripIds);
+    const totals = new Map<string, { settledOutMinor: number; settledInMinor: number }>();
+    for (const s of this.store.settlements.values()) {
+      if (s.status !== SettlementStatus.COMPLETED || !ids.has(s.tripId)) continue;
+      if (s.fromUserId !== userId && s.toUserId !== userId) continue;
+      const acc = totals.get(s.tripId) ?? { settledOutMinor: 0, settledInMinor: 0 };
+      if (s.fromUserId === userId) acc.settledOutMinor += s.amountMinor;
+      if (s.toUserId === userId) acc.settledInMinor += s.amountMinor;
+      totals.set(s.tripId, acc);
+    }
+    return totals;
+  }
 }
 
 // ── Device-token / Notification stubs ────────────────────────────────────────
@@ -933,4 +982,17 @@ class FakeDeviceTokenRepository implements IDeviceTokenRepository {
 /** Returns a no-op NotificationService suitable for smoke tests (FCM not configured). */
 export function buildNotificationService(): NotificationService {
   return new NotificationService(new FakeDeviceTokenRepository());
+}
+
+/** No-op activity repository — swallows writes, returns an empty feed. */
+class FakeActivityRepository implements ActivityRepository {
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async createMany(): Promise<number> { return 0; }
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async listForUser(): Promise<Activity[]> { return []; }
+}
+
+/** Returns a no-op ActivityService suitable for smoke tests. */
+export function buildActivityService(): ActivityService {
+  return new ActivityService(new FakeActivityRepository());
 }

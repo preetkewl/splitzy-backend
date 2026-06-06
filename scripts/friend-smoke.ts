@@ -27,6 +27,7 @@ import {
   FakeRefreshTokenRepository,
   FakeStore,
   FakeUserRepository,
+  buildActivityService,
   buildNotificationService,
 } from './lib/fakes.js';
 
@@ -49,7 +50,7 @@ async function buildApp(): Promise<TestApp> {
   const friendRepo = new FakeFriendRepository(store);
 
   const authService = new AuthService(userRepo, refreshRepo, tokens);
-  const friendService = new FriendService(friendRepo, userRepo, buildNotificationService());
+  const friendService = new FriendService(friendRepo, userRepo, buildNotificationService(), buildActivityService());
 
   const app = express();
   app.use(express.json());

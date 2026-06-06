@@ -91,6 +91,8 @@ export interface IFriendRepository {
   cancelRequest(requestId: string): Promise<FriendRequestWithUsers>;
   listIncoming(userId: string): Promise<FriendRequestWithUsers[]>;
   listOutgoing(userId: string): Promise<FriendRequestWithUsers[]>;
+  /** Cheap count of PENDING incoming requests — for the dashboard badge. */
+  countPendingIncoming(userId: string): Promise<number>;
 
   // Search
   searchUsers(filter: SearchFilter): Promise<User[]>;
@@ -288,6 +290,13 @@ export class FriendRepository implements IFriendRepository {
       where: { toUserId: userId, status: FriendRequestStatus.PENDING },
       orderBy: { createdAt: 'desc' },
       include: requestInclude,
+    });
+  }
+
+  countPendingIncoming(userId: string): Promise<number> {
+    // Served by @@index([toUserId, status]) — a cheap COUNT, no row fetch.
+    return this.prisma.friendRequest.count({
+      where: { toUserId: userId, status: FriendRequestStatus.PENDING },
     });
   }
 

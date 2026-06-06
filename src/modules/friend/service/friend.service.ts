@@ -4,6 +4,7 @@ import { ERROR_CODES } from '../../../constants/error-codes.js';
 import { HTTP } from '../../../constants/http.js';
 import { paginate, type PaginationInput } from '../../../database/helpers.js';
 import { logger } from '../../../utils/logger.js';
+import type { ActivityService } from '../../activity/index.js';
 import type { IUserRepository } from '../../auth/repository/user.repository.js';
 import type { NotificationService } from '../../notification/service/notification.service.js';
 import { SEARCH_DEFAULT_LIMIT } from '../constants.js';
@@ -37,6 +38,7 @@ export class FriendService {
     private readonly friends: IFriendRepository,
     private readonly users: IUserRepository,
     private readonly notifications: NotificationService,
+    private readonly activity: ActivityService,
   ) {}
 
   // ── list ──────────────────────────────────────────────────────────────────
@@ -225,6 +227,16 @@ export class FriendService {
       body: `${accepter?.name ?? 'Someone'} accepted your friend request`,
       type: 'FRIEND_ACCEPTED',
       data: { userId },
+    });
+
+    // Record activity for both sides (fire-and-forget). The requester gets
+    // their own row already; fetch their name for the accepter's row.
+    const requester = await this.users.findById(updated.fromUserId);
+    this.activity.recordFriendAccepted({
+      accepterId: userId,
+      accepterName: accepter?.name ?? 'Someone',
+      requesterId: updated.fromUserId,
+      requesterName: requester?.name ?? 'Someone',
     });
 
     return toFriendRequestDto(updated, userId);

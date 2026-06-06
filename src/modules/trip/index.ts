@@ -1,5 +1,6 @@
 import type { Router } from 'express';
 import { prisma } from '../../database/prisma.js';
+import type { ActivityService } from '../activity/index.js';
 import type { TokenService } from '../auth/service/token.service.js';
 import { ExpenseRepository } from '../expense/repository/expense.repository.js';
 import { SettlementRepository } from '../settlement/repository/settlement.repository.js';
@@ -13,11 +14,14 @@ export interface TripModule {
   service: TripService;
 }
 
-export function createTripModule(deps: { tokens: TokenService }): TripModule {
+export function createTripModule(deps: {
+  tokens: TokenService;
+  activity: ActivityService;
+}): TripModule {
   const repository = new TripRepository(prisma);
   const expenseRepo = new ExpenseRepository(prisma);
   const settlementRepo = new SettlementRepository(prisma);
-  const service = new TripService(repository, expenseRepo, settlementRepo);
+  const service = new TripService(repository, expenseRepo, settlementRepo, deps.activity);
   const controller = new TripController(service);
   const router = createTripRouter({ controller, tokens: deps.tokens });
   return { router, service };

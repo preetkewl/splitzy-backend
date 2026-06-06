@@ -5,6 +5,7 @@ import { env } from '../../../config/env.js';
 import { paginate, type PaginationInput } from '../../../database/helpers.js';
 import { logger } from '../../../utils/logger.js';
 import type { IUserRepository } from '../../auth/repository/user.repository.js';
+import type { ActivityService } from '../../activity/index.js';
 import type { NotificationService } from '../../notification/service/notification.service.js';
 import type { ISettlementRepository } from '../../settlement/repository/settlement.repository.js';
 import type { ITripRepository, TripMemberWithUser } from '../../trip/repository/trip.repository.js';
@@ -40,6 +41,7 @@ export class ExpenseService {
     private readonly users: IUserRepository,
     private readonly settlements: ISettlementRepository,
     private readonly notifications: NotificationService,
+    private readonly activity: ActivityService,
   ) {
     this.access = new TripAccess(trips);
   }
@@ -180,8 +182,8 @@ export class ExpenseService {
     const notifyUserIds = trip.members
       .map((m) => m.userId)
       .filter((id) => !payerUserIds.has(id));
+    const primaryPayerName = created.payments[0]?.user.name ?? 'Someone';
     if (notifyUserIds.length > 0) {
-      const primaryPayerName = created.payments[0]?.user.name ?? 'Someone';
       void this.notifications.sendToUsers(notifyUserIds, {
         title: 'New expense added',
         body: `${primaryPayerName} added "${created.title}"`,
@@ -189,6 +191,19 @@ export class ExpenseService {
         data: { tripId: input.tripId, expenseId: created.id },
       });
     }
+
+    // 14. Record activity for ALL trip members (the actor included, so it
+    //     reads as personal history). Fire-and-forget — never blocks the write.
+    this.activity.recordExpenseAdded({
+      tripId: input.tripId,
+      tripName: trip.name,
+      actorId: userId,
+      actorName: primaryPayerName,
+      recipientIds: trip.members.map((m) => m.userId),
+      expenseId: created.id,
+      title: created.title,
+      amountMinor: created.amountMinor,
+    });
 
     return toExpenseDto(created, { viewerUserId: userId });
   }

@@ -32,6 +32,7 @@ import {
   FakeStore,
   FakeTripRepository,
   FakeUserRepository,
+  buildActivityService,
 } from './lib/fakes.js';
 
 interface JsonResult {
@@ -60,7 +61,7 @@ async function buildApp(): Promise<TestApp> {
 
   const authService = new AuthService(userRepo, refreshRepo, tokens);
   const authController = new AuthController(authService);
-  const tripService = new TripService(tripRepo, expenseRepo, settlementRepo);
+  const tripService = new TripService(tripRepo, expenseRepo, settlementRepo, buildActivityService());
   const tripController = new TripController(tripService);
 
   const app = express();

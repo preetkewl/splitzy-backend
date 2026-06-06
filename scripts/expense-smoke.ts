@@ -33,6 +33,7 @@ import {
   FakeStore,
   FakeTripRepository,
   FakeUserRepository,
+  buildActivityService,
   buildNotificationService,
 } from './lib/fakes.js';
 
@@ -60,8 +61,8 @@ async function buildApp(): Promise<TestApp> {
   const settlementRepo = new FakeSettlementRepository(store);
 
   const authService = new AuthService(userRepo, refreshRepo, tokens);
-  const tripService = new TripService(tripRepo, expenseRepo, settlementRepo);
-  const expenseService = new ExpenseService(expenseRepo, tripRepo, userRepo, settlementRepo, buildNotificationService());
+  const tripService = new TripService(tripRepo, expenseRepo, settlementRepo, buildActivityService());
+  const expenseService = new ExpenseService(expenseRepo, tripRepo, userRepo, settlementRepo, buildNotificationService(), buildActivityService());
 
   const app = express();
   app.use(express.json());

@@ -1,5 +1,7 @@
 import { Router } from 'express';
+import { createActivityModule } from '../modules/activity/index.js';
 import { createAuthModule } from '../modules/auth/index.js';
+import { createDashboardModule } from '../modules/dashboard/index.js';
 import { createExpenseModule } from '../modules/expense/index.js';
 import { createFriendModule } from '../modules/friend/index.js';
 import { healthRouter } from '../modules/health/routes/health.routes.js';
@@ -22,17 +24,26 @@ export function createApiRouter(): Router {
   const notificationModule = createNotificationModule({ tokens: auth.tokens });
   const { service: notifications } = notificationModule;
 
-  const trips = createTripModule({ tokens: auth.tokens });
+  // Activity module is built early too — its service is injected (alongside
+  // notifications) into every module that emits a feed event. Writes are
+  // fire-and-forget, so this never couples to the business write paths.
+  const activityModule = createActivityModule({ tokens: auth.tokens });
+  const { service: activity } = activityModule;
+
+  const trips = createTripModule({ tokens: auth.tokens, activity });
   // Settlements are built first so the Expense module can read from the
   // same repository when computing balances — no double-wiring.
-  const settlements = createSettlementModule({ tokens: auth.tokens, notifications });
+  const settlements = createSettlementModule({ tokens: auth.tokens, notifications, activity });
   const expenses = createExpenseModule({
     tokens: auth.tokens,
     settlements: settlements.repository,
     notifications,
+    activity,
   });
-  const friends = createFriendModule({ tokens: auth.tokens, notifications });
+  const friends = createFriendModule({ tokens: auth.tokens, notifications, activity });
   const subscription = createSubscriptionModule({ tokens: auth.tokens });
+  // Read-only aggregation endpoint — collapses the Home fan-out.
+  const dashboard = createDashboardModule({ tokens: auth.tokens });
 
   router.use('/health', healthRouter);
   router.use('/auth', auth.router);
@@ -46,6 +57,8 @@ export function createApiRouter(): Router {
   router.use('/settlements', settlements.rootRouter);
   router.use('/friends', friends.router);
   router.use('/notifications', notificationModule.router);
+  router.use('/activity', activityModule.router);
+  router.use('/me', dashboard.router);
   router.use('/subscriptions', subscription.router);
 
   return router;

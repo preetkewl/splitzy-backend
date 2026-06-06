@@ -1,5 +1,6 @@
 import type { Router } from 'express';
 import { prisma } from '../../database/prisma.js';
+import type { ActivityService } from '../activity/index.js';
 import type { TokenService } from '../auth/service/token.service.js';
 import type { NotificationService } from '../notification/service/notification.service.js';
 import { TripRepository } from '../trip/repository/trip.repository.js';
@@ -18,10 +19,11 @@ export interface SettlementModule {
 export function createSettlementModule(deps: {
   tokens: TokenService;
   notifications: NotificationService;
+  activity: ActivityService;
 }): SettlementModule {
   const repository = new SettlementRepository(prisma);
   const tripRepo = new TripRepository(prisma);
-  const service = new SettlementService(repository, tripRepo, deps.notifications);
+  const service = new SettlementService(repository, tripRepo, deps.notifications, deps.activity);
   const controller = new SettlementController(service);
   const { rootRouter, tripScopedRouter } = createSettlementRouters({
     controller,
