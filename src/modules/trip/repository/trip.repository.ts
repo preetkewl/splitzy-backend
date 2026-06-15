@@ -46,9 +46,19 @@ export interface UpdateTripData {
 
 // ── Interface + implementation ───────────────────────────────────────────────
 
+/**
+ * Optional hooks run INSIDE the trip-create transaction. `beforeCreate` fires
+ * before the trip row is inserted, sharing the same `tx` — this is where
+ * entitlement/quota enforcement runs so the check and the insert are atomic and
+ * race-safe (the service throws from here to abort the transaction).
+ */
+export interface TripCreateHooks {
+  beforeCreate?: (tx: Prisma.TransactionClient) => Promise<void>;
+}
+
 export interface ITripRepository {
   /** Trip create + creator-as-OWNER + extra members in one transaction. */
-  create(data: CreateTripData): Promise<TripDetailRow>;
+  create(data: CreateTripData, hooks?: TripCreateHooks): Promise<TripDetailRow>;
 
   /** Soft-deleted trips are excluded. */
   findById(tripId: string): Promise<Trip | null>;
@@ -91,7 +101,7 @@ export class TripRepository implements ITripRepository {
 
   // ── create ─────────────────────────────────────────────────────────────────
 
-  async create(data: CreateTripData): Promise<TripDetailRow> {
+  async create(data: CreateTripData, hooks?: TripCreateHooks): Promise<TripDetailRow> {
     // Dedupe + drop creator if present in the supplied member list — the
     // creator is always added as OWNER, never twice.
     const extraMembers = Array.from(new Set(data.memberIds)).filter(
@@ -99,6 +109,10 @@ export class TripRepository implements ITripRepository {
     );
 
     const trip = await this.prisma.$transaction(async (tx) => {
+      // Enforcement hook (e.g. free-tier group limit) runs in-transaction,
+      // before the insert, so the check + insert are atomic and race-safe.
+      await hooks?.beforeCreate?.(tx);
+
       const created = await tx.trip.create({
         data: {
           name: data.name,

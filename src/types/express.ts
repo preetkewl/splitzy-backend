@@ -20,6 +20,15 @@ declare global {
        * `X-Request-Id` header and threaded through every log line.
        */
       requestId?: string;
+      /**
+       * Resolved entitlement snapshot, attached by the entitlement-resolver /
+       * optionalPremium middleware. Authoritative (derived from
+       * UserEntitlement, never the stale User.isPremium cache).
+       */
+      entitlement?: {
+        premium: boolean;
+        premiumExpiresAt: string | null;
+      };
     }
   }
 }

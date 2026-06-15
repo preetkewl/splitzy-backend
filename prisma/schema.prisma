@@ -127,6 +127,95 @@ enum ActivityEntityType {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Monetization (Phase 2A — entitlement foundation)
+//
+// These power the server-authoritative entitlement model. Nothing here is set
+// from client-trusted input: entitlement facts derive from verified purchases
+// (verification + RTDN land in later phases). Like every enum in this file,
+// adding a value requires a dedicated `ALTER TYPE … ADD VALUE` migration that
+// shares no file with table DDL.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Abstract capability a user can hold. Source-agnostic: PREMIUM can be granted
+/// by a subscription today and by a reward/admin grant later. Extensible
+/// (e.g. NO_ADS, UNLIMITED_TRIPS) without reshaping the entitlement tables.
+enum EntitlementType {
+  PREMIUM
+}
+
+/// Where an entitlement came from. Only SUBSCRIPTION is exercised in Phase 2A;
+/// the rest are reserved so reward/admin/promo flows drop in without migration.
+enum EntitlementSource {
+  SUBSCRIPTION
+  REWARD
+  GRANT
+  PROMO
+}
+
+/// Derived on/off state of a single entitlement row. Distinct from
+/// SubscriptionState (the Google billing lifecycle) — many subscription states
+/// collapse to the same entitlement answer (e.g. CANCELED-but-in-period and
+/// IN_GRACE_PERIOD both keep the entitlement ACTIVE).
+enum EntitlementStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+}
+
+/// Google Play subscription lifecycle, mirrored from the Developer API /
+/// `subscriptionsv2` state. PENDING is the local-only initial state before any
+/// verification has run (the only state Phase 2A can produce).
+enum SubscriptionState {
+  PENDING
+  ACTIVE
+  CANCELED
+  IN_GRACE_PERIOD
+  ON_HOLD
+  PAUSED
+  EXPIRED
+  REVOKED
+}
+
+/// Append-only audit event taxonomy. Records every external signal and every
+/// derived state change for reconciliation/forensics. RTDN_* values are
+/// reserved for the later webhook phase.
+enum AuditEventType {
+  VERIFY_REQUESTED
+  VERIFY_SUCCEEDED
+  VERIFY_FAILED
+  PURCHASE_RECORDED
+  PURCHASE_UPDATED
+  ENTITLEMENT_GRANTED
+  ENTITLEMENT_RENEWED
+  ENTITLEMENT_REVOKED
+  ENTITLEMENT_EXPIRED
+  RTDN_RECEIVED
+}
+
+/// Origin of an audit signal. Lets us separate client-driven writes from
+/// Google-driven (RTDN) ones from internal jobs/admin actions.
+enum AuditSource {
+  CLIENT
+  RTDN
+  SYSTEM
+  ADMIN
+}
+
+/// Business reason behind an entitlement_history transition. BACKFILL marks
+/// rows synthesised by the grandfathering migration so they are distinguishable
+/// from genuinely-verified grants during later reconciliation.
+enum EntitlementChangeReason {
+  PURCHASE_VERIFIED
+  RENEWAL
+  CANCELLATION
+  EXPIRY
+  REVOCATION
+  ADMIN_GRANT
+  REWARD_GRANT
+  BACKFILL
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // User & Auth
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -147,14 +236,27 @@ model User {
   avatarUrl   String?
   upiId       String?
 
-  // ── Subscription (Google Play) ───────────────────────────────────────────
+  // ── Subscription (Google Play) — LEGACY (Phase 1) ──────────────────────────
+  // DEPRECATED as of Phase 2A. These are NO LONGER the source of truth — that
+  // role moves to UserEntitlement (derived state) + SubscriptionPurchase (the
+  // verified ledger). They are retained only for backward compatibility while
+  // the backfill + frontend cutover land, and must not be written from any
+  // client-driven path. Slated for removal once enforcement reads entitlements.
+  /// @deprecated use the PREMIUM UserEntitlement instead.
   isPremium              Boolean   @default(false)
-  /// Raw purchase token from Google Play. Stored for server-side verification.
+  /// @deprecated moved to SubscriptionPurchase.purchaseToken (never store the
+  /// token on the user row — it enabled token-sharing across accounts).
   subscriptionToken      String?
-  /// Product ID purchased (e.g. splitzy_weekly, splitzy_monthly).
+  /// @deprecated derived from SubscriptionPurchase.productId.
   subscriptionProductId  String?
-  /// When the current subscription period expires. Null until first purchase.
+  /// @deprecated superseded by premiumExpiresAt (cache) / UserEntitlement.
   subscriptionExpiresAt  DateTime?
+
+  /// Denormalized read-cache of the active PREMIUM entitlement's expiry, kept
+  /// so `/auth/me` and toUserDto can answer "is premium / until when" with no
+  /// extra query. Written ONLY by the entitlement service — never the client.
+  /// NULL = no active premium entitlement.
+  premiumExpiresAt       DateTime?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -176,6 +278,10 @@ model User {
   deviceTokens           DeviceToken[]
   activitiesReceived     Activity[]           @relation("ActivityRecipient")
   activitiesActed        Activity[]           @relation("ActivityActor")
+  subscriptionPurchases  SubscriptionPurchase[]
+  entitlements           UserEntitlement[]
+  quotaTracking          QuotaTracking[]
+  rewardUnlocks          RewardUnlock[]
 
   @@index([deletedAt])
   @@index([name])
@@ -615,4 +721,173 @@ model Activity {
   // Keeps trip hard-delete cascade from sequential-scanning this table.
   @@index([tripId])
   @@map("activities")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Monetization — entitlement foundation (Phase 2A)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// The purchase ledger: one row per Google Play purchase token, holding the
+/// latest known billing state. Facts here are append-safe — the row is updated
+/// in place across the subscription lifetime (renewals/cancellations), never
+/// duplicated. Verification + RTDN that populate the Google-sourced fields land
+/// in later phases; in Phase 2A a row is created PENDING with the local token.
+model SubscriptionPurchase {
+  id                  String            @id @default(uuid()) @db.Uuid
+  userId              String            @db.Uuid
+  /// Globally-unique Play purchase token. THE replay/sharing guard: one token →
+  /// one row → bound to the first claiming user. A second user presenting the
+  /// same token is rejected by the service, never granted a second time.
+  purchaseToken       String            @unique
+  /// Product purchased (e.g. settlio_premium_monthly). In later phases this is
+  /// authoritatively the productId Google returns, not the client's claim.
+  productId           String
+  /// Google orderId (latest known). NULL until first verification.
+  orderId             String?
+  state               SubscriptionState @default(PENDING)
+  /// Lifecycle timestamps mirrored from Google. NULL until verified.
+  purchasedAt         DateTime?
+  expiresAt           DateTime?
+  autoRenewing        Boolean           @default(false)
+  /// Whether the purchase has been acknowledged to Google (must happen within
+  /// 3 days or Google auto-refunds). Wired in the verification phase.
+  acknowledged        Boolean           @default(false)
+  /// Google linkedPurchaseToken — the token chain across upgrades / downgrades /
+  /// resubscribes. Lets a renewal/upgrade close the prior purchase's entitlement.
+  linkedPurchaseToken String?
+  /// Raw latest `subscriptionsv2.get` payload — forensic snapshot for disputes
+  /// and reconciliation. NULL in Phase 2A (no verification yet).
+  latestGoogleState   Json?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  // Serves the future expiry/renewal sweep: scan due rows by state + expiry.
+  @@index([state, expiresAt])
+  @@index([orderId])
+  @@map("subscription_purchases")
+}
+
+/// Derived current entitlement state — the SINGLE read path enforcement will
+/// use. A user "has PREMIUM" iff a row exists with status ACTIVE and
+/// (expiresAt IS NULL OR expiresAt > now()). Source-aware so the same PREMIUM
+/// entitlement can be backed by a subscription today and a reward/grant later.
+model UserEntitlement {
+  id          String            @id @default(uuid()) @db.Uuid
+  userId      String            @db.Uuid
+  entitlement EntitlementType
+  source      EntitlementSource
+  /// Identifier of the granting record within its source domain
+  /// (SubscriptionPurchase.id, RewardUnlock.id, an admin-grant id, …). NULL is
+  /// allowed for sourceless system grants.
+  sourceRef   String?
+  status      EntitlementStatus @default(ACTIVE)
+  startsAt    DateTime          @default(now())
+  /// NULL = perpetual (admin/promo grants). For subscriptions this mirrors the
+  /// purchase expiry and is what enforcement compares against now().
+  expiresAt   DateTime?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Idempotency: re-verifying the same source grant UPDATES the one row rather
+  // than inserting a duplicate. (Postgres treats NULL sourceRefs as distinct,
+  // which is the intended behaviour for one-off sourceless grants.)
+  @@unique([userId, entitlement, source, sourceRef])
+  // Hot read path: "does user X hold entitlement Y right now".
+  @@index([userId, entitlement, status])
+  // Future expiry sweep.
+  @@index([status, expiresAt])
+  @@map("user_entitlements")
+}
+
+/// Append-only forensic log of every monetization signal — verify requests,
+/// derived state changes, and (later) each RTDN message. Deliberately has NO
+/// foreign key to users: it must survive account deletion as a financial /
+/// dispute record. `googleMessageId` is the RTDN idempotency key.
+model PurchaseAuditLog {
+  id              String         @id @default(uuid()) @db.Uuid
+  /// Loose reference (no FK) — NULL when an event can't be resolved to a user
+  /// (e.g. a malformed RTDN message).
+  userId          String?        @db.Uuid
+  purchaseToken   String?
+  eventType       AuditEventType
+  source          AuditSource    @default(SYSTEM)
+  /// Raw event payload (verify body, RTDN message envelope, derived diff, …).
+  payload         Json?
+  /// Pub/Sub messageId — unique so a redelivered RTDN is dropped idempotently.
+  /// NULL for non-RTDN events (NULLs are distinct, so many are allowed).
+  googleMessageId String?        @unique
+  processedOk     Boolean        @default(true)
+  createdAt       DateTime       @default(now())
+
+  @@index([purchaseToken])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("purchase_audit_log")
+}
+
+/// Append-only BUSINESS timeline of entitlement on/off transitions — distinct
+/// from the raw audit log. Answers "when did premium turn on/off and why" for
+/// support and disputes. No FK, for the same survive-deletion reason.
+model EntitlementHistory {
+  id                String                  @id @default(uuid()) @db.Uuid
+  userId            String                  @db.Uuid
+  entitlement       EntitlementType
+  /// NULL when the entitlement is first created (no prior state).
+  fromStatus        EntitlementStatus?
+  toStatus          EntitlementStatus
+  reason            EntitlementChangeReason
+  effectiveAt       DateTime                @default(now())
+  /// SubscriptionPurchase.id that drove the change, when applicable.
+  relatedPurchaseId String?                 @db.Uuid
+  createdAt         DateTime                @default(now())
+
+  @@index([userId, entitlement])
+  @@index([createdAt])
+  @@map("entitlement_history")
+}
+
+/// FUTURE-READY STUB (Phase 2A defines the shape; nothing writes here yet).
+/// Server-side counters for metered free-tier limits (e.g. trips_active) so
+/// quota enforcement can be authoritative rather than client-side.
+model QuotaTracking {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @db.Uuid
+  /// App-defined counter key, e.g. 'trips_active'.
+  quotaKey      String
+  usedCount     Int       @default(0)
+  /// Per-user override of the default free-tier limit (NULL = use default).
+  limitOverride Int?
+  /// NULL = lifetime / non-windowed quota; set for periodic (e.g. monthly) ones.
+  periodStart   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, quotaKey, periodStart])
+  @@map("quota_tracking")
+}
+
+/// FUTURE-READY STUB (shape only in Phase 2A). Ad-watch / referral unlocks that
+/// later materialise as REWARD-sourced UserEntitlement rows (e.g. +1 trip).
+model RewardUnlock {
+  id                 String          @id @default(uuid()) @db.Uuid
+  userId             String          @db.Uuid
+  rewardType         String
+  grantedEntitlement EntitlementType
+  quantity           Int             @default(1)
+  expiresAt          DateTime?
+  consumedAt         DateTime?
+  sourceEvent        Json?
+  createdAt          DateTime        @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, rewardType])
+  @@map("reward_unlocks")
 }

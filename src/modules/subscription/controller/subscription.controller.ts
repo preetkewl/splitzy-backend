@@ -17,10 +17,9 @@ export class SubscriptionController {
 
   verify = asyncHandler(async (req: TypedRequest<VerifySubscriptionBody>, res: Response) => {
     const userId = this.requireUserId(req);
-    const result = await this.service.verify(userId, {
-      purchaseToken: req.body.purchaseToken,
-      productId: req.body.productId,
-    });
+    // Only the purchaseToken is trusted. A client-sent productId (older builds
+    // include it) is ignored — the authoritative product comes from Google.
+    const result = await this.service.verify(userId, req.body.purchaseToken);
     return ApiResponse.ok(res, result);
   });
 }

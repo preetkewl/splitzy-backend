@@ -33,6 +33,7 @@ import {
   FakeTripRepository,
   FakeUserRepository,
   buildActivityService,
+  buildNoopLimits,
 } from './lib/fakes.js';
 
 interface JsonResult {
@@ -61,7 +62,7 @@ async function buildApp(): Promise<TestApp> {
 
   const authService = new AuthService(userRepo, refreshRepo, tokens);
   const authController = new AuthController(authService);
-  const tripService = new TripService(tripRepo, expenseRepo, settlementRepo, buildActivityService());
+  const tripService = new TripService(tripRepo, expenseRepo, settlementRepo, buildActivityService(), buildNoopLimits());
   const tripController = new TripController(tripService);
 
   const app = express();

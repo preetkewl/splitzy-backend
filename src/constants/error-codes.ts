@@ -18,6 +18,9 @@ export const ERROR_CODES = {
   HANDLE_TAKEN: 'HANDLE_TAKEN',
   PHONE_TAKEN: 'PHONE_TAKEN',
   PENDING_DUES: 'PENDING_DUES',
+  // Monetization / entitlement enforcement (Phase 3)
+  PREMIUM_REQUIRED: 'PREMIUM_REQUIRED',
+  FREE_GROUP_LIMIT_REACHED: 'FREE_GROUP_LIMIT_REACHED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

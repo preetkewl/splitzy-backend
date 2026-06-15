@@ -50,6 +50,7 @@ import type {
 } from '../../src/modules/friend/repository/friend.repository.js';
 import { ActivityService } from '../../src/modules/activity/index.js';
 import type { ActivityRepository } from '../../src/modules/activity/index.js';
+import type { LimitEvaluationService } from '../../src/modules/entitlement/service/limit-evaluation.service.js';
 import type { IDeviceTokenRepository } from '../../src/modules/notification/repository/device-token.repository.js';
 import { NotificationService } from '../../src/modules/notification/service/notification.service.js';
 import type { SettlementWithUsers } from '../../src/modules/settlement/mapper/settlement.mapper.js';
@@ -142,6 +143,13 @@ export class FakeUserRepository implements IUserRepository {
       avatarColor: input.avatarColor,
       avatarUrl: input.avatarUrl ?? null,
       upiId: null,
+      // Subscription / entitlement fields — free-tier defaults. (Legacy Phase 1
+      // fields plus the Phase 2A premiumExpiresAt cache.)
+      isPremium: false,
+      subscriptionToken: null,
+      subscriptionProductId: null,
+      subscriptionExpiresAt: null,
+      premiumExpiresAt: null,
       createdAt: now,
       updatedAt: now,
       deletedAt: null,
@@ -995,4 +1003,16 @@ class FakeActivityRepository implements ActivityRepository {
 /** Returns a no-op ActivityService suitable for smoke tests. */
 export function buildActivityService(): ActivityService {
   return new ActivityService(new FakeActivityRepository());
+}
+
+/**
+ * Permissive LimitEvaluationService for smoke tests that exercise trip CRUD but
+ * not entitlement enforcement — enforcement is a no-op (always allowed). The
+ * dedicated enforcement smoke tests the real limit logic separately.
+ */
+export function buildNoopLimits(): LimitEvaluationService {
+  return {
+    enforceGroupCreation: async () => {},
+    evaluateGroupCreation: async () => ({ allowed: true, premium: true, usage: null, limit: null }),
+  } as unknown as LimitEvaluationService;
 }

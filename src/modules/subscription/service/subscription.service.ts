@@ -1,32 +1,18 @@
-import type { SubscriptionRepository } from '../repository/subscription.repository.js';
-import type { SubscriptionStatusDto, VerifySubscriptionInput } from '../dto/index.js';
+import type { VerificationService } from '../../entitlement/service/verification.service.js';
+import type { SubscriptionStatusDto } from '../dto/index.js';
 
-// Weekly = 7 days, Monthly = 30 days. These are generous — a real
-// implementation would verify expiry from the Google Play Developer API.
-const EXPIRY_DAYS: Record<string, number> = {
-  splitzy_weekly: 7,
-  splitzy_monthly: 30,
-};
-
+/**
+ * Thin adapter over the entitlement module's real Google Play
+ * {@link VerificationService} (Phase 2B). The previous Phase-1 implementation
+ * fake-granted premium by writing legacy User fields directly; that path —
+ * along with its repository — has been removed. The backend now trusts ONLY
+ * Google: it derives product, state and expiry server-side, so the client's
+ * claimed productId is never used.
+ */
 export class SubscriptionService {
-  constructor(private readonly repo: SubscriptionRepository) {}
+  constructor(private readonly verification: VerificationService) {}
 
-  async verify(userId: string, input: VerifySubscriptionInput): Promise<SubscriptionStatusDto> {
-    const days = EXPIRY_DAYS[input.productId] ?? 30;
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + days);
-
-    const user = await this.repo.updateSubscription(userId, {
-      isPremium: true,
-      subscriptionToken: input.purchaseToken,
-      subscriptionProductId: input.productId,
-      subscriptionExpiresAt: expiresAt,
-    });
-
-    return {
-      isPremium: user.isPremium,
-      productId: user.subscriptionProductId,
-      expiresAt: user.subscriptionExpiresAt?.toISOString() ?? null,
-    };
+  verify(userId: string, purchaseToken: string): Promise<SubscriptionStatusDto> {
+    return this.verification.verify(userId, purchaseToken);
   }
 }

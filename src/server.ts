@@ -1,10 +1,15 @@
 import type { Server } from 'node:http';
 import { createApp } from './app.js';
 import { env } from './config/env.js';
+import { validateMonetizationConfig } from './config/startup-validation.js';
 import { connectDatabase, disconnectDatabase } from './database/prisma.js';
 import { logger } from './utils/logger.js';
 
 async function bootstrap(): Promise<void> {
+  // Fail fast if monetization is required but misconfigured (before accepting
+  // traffic). Logs a readiness diagnostic either way.
+  validateMonetizationConfig();
+
   await connectDatabase();
 
   const app = createApp();

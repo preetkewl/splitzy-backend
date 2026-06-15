@@ -13,6 +13,7 @@ import type {
   TripSummaryDto,
   UpdateTripInput,
 } from '../dto/index.js';
+import type { LimitEvaluationService } from '../../entitlement/service/limit-evaluation.service.js';
 import { toMember, toTripDetail, toTripSummary } from '../mapper/trip.mapper.js';
 import type { ITripRepository } from '../repository/trip.repository.js';
 import { TripAccess } from './access.js';
@@ -32,6 +33,7 @@ export class TripService {
     private readonly expenseRepo: IExpenseRepository,
     private readonly settlementRepo: ISettlementRepository,
     private readonly activity: ActivityService,
+    private readonly limits: LimitEvaluationService,
   ) {
     this.access = new TripAccess(trips);
   }
@@ -47,14 +49,25 @@ export class TripService {
       }
     }
 
-    const trip = await this.trips.create({
-      name: input.name,
-      emoji: input.emoji,
-      coverColor: input.coverColor ?? this.pickCoverColor(),
-      description: input.description ?? null,
-      createdById: userId,
-      memberIds,
-    });
+    const trip = await this.trips.create(
+      {
+        name: input.name,
+        emoji: input.emoji,
+        coverColor: input.coverColor ?? this.pickCoverColor(),
+        description: input.description ?? null,
+        createdById: userId,
+        memberIds,
+      },
+      {
+        // Authoritative free-tier limit, enforced in-transaction and race-safe.
+        // Counts only ACTIVE (non-deleted) groups the user OWNS. Premium →
+        // unlimited. Throws FREE_GROUP_LIMIT_REACHED if exceeded.
+        beforeCreate: (tx) =>
+          this.limits.enforceGroupCreation(tx, userId, () =>
+            tx.trip.count({ where: { createdById: userId, deletedAt: null } }),
+          ),
+      },
+    );
     logger.info(
       { tripId: trip.id, ownerId: userId, memberCount: trip.members.length },
       'trip created',

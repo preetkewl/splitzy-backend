@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { createActivityModule } from '../modules/activity/index.js';
 import { createAuthModule } from '../modules/auth/index.js';
 import { createDashboardModule } from '../modules/dashboard/index.js';
+import { createEntitlementModule } from '../modules/entitlement/index.js';
 import { createExpenseModule } from '../modules/expense/index.js';
 import { createFriendModule } from '../modules/friend/index.js';
 import { healthRouter } from '../modules/health/routes/health.routes.js';
@@ -30,7 +31,12 @@ export function createApiRouter(): Router {
   const activityModule = createActivityModule({ tokens: auth.tokens });
   const { service: activity } = activityModule;
 
-  const trips = createTripModule({ tokens: auth.tokens, activity });
+  // Monetization: the entitlement module owns the source-of-truth services and
+  // the authoritative enforcement (limits/guard). Built before the trip module
+  // so trip creation can enforce the free-tier group limit server-side.
+  const entitlement = createEntitlementModule();
+
+  const trips = createTripModule({ tokens: auth.tokens, activity, limits: entitlement.limits });
   // Settlements are built first so the Expense module can read from the
   // same repository when computing balances — no double-wiring.
   const settlements = createSettlementModule({ tokens: auth.tokens, notifications, activity });
@@ -41,7 +47,11 @@ export function createApiRouter(): Router {
     activity,
   });
   const friends = createFriendModule({ tokens: auth.tokens, notifications, activity });
-  const subscription = createSubscriptionModule({ tokens: auth.tokens });
+  const subscription = createSubscriptionModule({
+    tokens: auth.tokens,
+    verification: entitlement.verification,
+    rtdn: entitlement.rtdn,
+  });
   // Read-only aggregation endpoint — collapses the Home fan-out.
   const dashboard = createDashboardModule({ tokens: auth.tokens });
 

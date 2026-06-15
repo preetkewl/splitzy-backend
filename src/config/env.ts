@@ -21,6 +21,31 @@ const envSchema = z.object({
   // without FCM configured; notification calls become no-ops in that case.
   FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),
 
+  // ── Google Play Developer API (subscription verification) ────────────────────
+  // The Android application id whose subscriptions we verify (e.g. com.settlio.app).
+  GOOGLE_PLAY_PACKAGE_NAME: z.string().optional(),
+  // Full service-account JSON (single env var, mirrors FIREBASE_SERVICE_ACCOUNT_JSON).
+  // The account needs the "View financial data / Manage orders" permission in
+  // Play Console. Optional so the server still boots without it — but the verify
+  // endpoint then fails CLOSED (it never fake-grants).
+  GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: z.string().optional(),
+  // Shared secret guarding the RTDN webhook. Append it to the Pub/Sub push
+  // endpoint as `?token=…` (or send it as the `x-rtdn-token` header). When set,
+  // the webhook rejects any request without a matching token. When UNSET, the
+  // webhook is rejected in production and allowed (with a warning) elsewhere so
+  // local/staging testing works without a secret.
+  RTDN_VERIFICATION_TOKEN: z.string().optional(),
+
+  // Whether monetization is REQUIRED for this deployment. When required and the
+  // Google Play / RTDN secrets are missing, the server FAILS FAST at startup
+  // (rather than silently running a broken billing surface). Tri-state: unset →
+  // defaults to "required in production only". Set `false` to run without
+  // billing (e.g. a staging API that doesn't exercise purchases).
+  MONETIZATION_REQUIRED: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v === undefined ? undefined : v === 'true')),
+
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
 
