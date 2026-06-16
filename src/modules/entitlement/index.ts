@@ -7,6 +7,7 @@ import { EntitlementService } from './service/entitlement.service.js';
 import { LimitEvaluationService } from './service/limit-evaluation.service.js';
 import { PurchaseLedgerService } from './service/purchase-ledger.service.js';
 import { ReconciliationService } from './service/reconciliation.service.js';
+import { RewardService } from './service/reward.service.js';
 import { RtdnService } from './service/rtdn.service.js';
 import { VerificationService } from './service/verification.service.js';
 
@@ -33,6 +34,8 @@ export interface EntitlementModule {
   reconciliation: ReconciliationService;
   /** Authoritative premium resolver (Phase 3). */
   guard: EntitlementGuardService;
+  /** Rewarded-ad unlocks + derived group allowance. */
+  rewards: RewardService;
   /** Quota evaluation + race-safe enforcement (Phase 3). */
   limits: LimitEvaluationService;
   /** HTTP entitlement guards (Phase 3). */
@@ -49,9 +52,10 @@ export function createEntitlementModule(): EntitlementModule {
   const rtdn = new RtdnService(repository, verification);
   const reconciliation = new ReconciliationService(repository, verification, google);
   const guard = new EntitlementGuardService(repository);
-  const limits = new LimitEvaluationService(guard);
+  const rewards = new RewardService(prisma, repository, guard);
+  const limits = new LimitEvaluationService(rewards);
   const middleware = createEntitlementMiddleware(guard);
-  return { repository, entitlements, purchases, verification, rtdn, reconciliation, guard, limits, middleware, google };
+  return { repository, entitlements, purchases, verification, rtdn, reconciliation, guard, rewards, limits, middleware, google };
 }
 
 export { EntitlementRepository } from './repository/entitlement.repository.js';
@@ -62,12 +66,20 @@ export { RtdnService } from './service/rtdn.service.js';
 export { ReconciliationService } from './service/reconciliation.service.js';
 export { EntitlementGuardService } from './service/entitlement-guard.service.js';
 export {
+  RewardService,
+  type GroupAllowance,
+  type GrantRewardResult,
+} from './service/reward.service.js';
+export {
   LimitEvaluationService,
   freeGroupLimitError,
+  premiumGroupLimitError,
   premiumRequiredError,
   type GroupLimitDecision,
   type CountActiveGroups,
 } from './service/limit-evaluation.service.js';
+export { RewardController } from './controller/reward.controller.js';
+export { createRewardRouter } from './routes/reward.routes.js';
 export { createEntitlementMiddleware, type EntitlementMiddleware } from './middleware/entitlement.middleware.js';
 export type { GooglePlayClient } from './google/google-play-client.js';
 export * from './constants.js';

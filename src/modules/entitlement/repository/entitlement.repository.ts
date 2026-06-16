@@ -4,14 +4,14 @@ import type {
   EntitlementChangeReason,
   EntitlementHistory,
   EntitlementSource,
-  EntitlementType,
   Prisma,
   PrismaClient,
   SubscriptionPurchase,
   UserEntitlement,
 } from '@prisma/client';
 // Used as runtime values (defaults / query filters), so a value import.
-import { EntitlementStatus, SubscriptionState } from '@prisma/client';
+import { EntitlementStatus, EntitlementType, SubscriptionState } from '@prisma/client';
+import { REWARD_TYPES } from '../constants.js';
 
 /**
  * Any Prisma executor — the base client or an interactive-transaction client.
@@ -280,6 +280,45 @@ export class EntitlementRepository {
         status: EntitlementStatus.ACTIVE,
         OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
       },
+    });
+  }
+
+  // ── Reward unlocks ───────────────────────────────────────────────────────────
+
+  /**
+   * How many active (non-consumed, non-expired) EXTRA_GROUP_SLOT rewards the
+   * user holds. Each row is one rewarded-ad watch granting +1 permanent group
+   * slot. consumedAt/expiresAt are NULL today (permanent), but filtered so a
+   * future "consume" or expiry policy slots in without changing callers.
+   */
+  countActiveGroupSlotRewards(userId: string, now: Date = new Date(), db: Db = this.prisma): Promise<number> {
+    return db.rewardUnlock.count({
+      where: {
+        userId,
+        rewardType: REWARD_TYPES.EXTRA_GROUP,
+        grantedEntitlement: EntitlementType.EXTRA_GROUP_SLOT,
+        consumedAt: null,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+      },
+    });
+  }
+
+  /** Persist one earned extra-group slot. `sourceEvent` stores ad metadata for audit. */
+  createGroupSlotReward(
+    userId: string,
+    sourceEvent: Prisma.InputJsonValue | undefined,
+    db: Db = this.prisma,
+  ): Promise<{ id: string }> {
+    return db.rewardUnlock.create({
+      data: {
+        userId,
+        rewardType: REWARD_TYPES.EXTRA_GROUP,
+        grantedEntitlement: EntitlementType.EXTRA_GROUP_SLOT,
+        quantity: 1,
+        expiresAt: null,
+        ...(sourceEvent !== undefined ? { sourceEvent } : {}),
+      },
+      select: { id: true },
     });
   }
 

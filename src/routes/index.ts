@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { createActivityModule } from '../modules/activity/index.js';
 import { createAuthModule } from '../modules/auth/index.js';
 import { createDashboardModule } from '../modules/dashboard/index.js';
-import { createEntitlementModule } from '../modules/entitlement/index.js';
+import { createEntitlementModule, createRewardRouter, RewardController } from '../modules/entitlement/index.js';
 import { createExpenseModule } from '../modules/expense/index.js';
 import { createFriendModule } from '../modules/friend/index.js';
 import { healthRouter } from '../modules/health/routes/health.routes.js';
@@ -18,7 +18,16 @@ import { createTripModule } from '../modules/trip/index.js';
  */
 export function createApiRouter(): Router {
   const router = Router();
-  const auth = createAuthModule();
+
+  // Monetization: the entitlement module owns the source-of-truth services and
+  // the authoritative enforcement (limits/guard/rewards). Built FIRST so its
+  // group-allowance resolver can ride on `/auth/me` and the trip module can
+  // enforce the group limit server-side.
+  const entitlement = createEntitlementModule();
+
+  const auth = createAuthModule({
+    groupAllowance: (userId) => entitlement.rewards.getGroupAllowance(userId),
+  });
 
   // Notification module is built first — its service is injected into every
   // other module that fires push notifications.
@@ -31,12 +40,14 @@ export function createApiRouter(): Router {
   const activityModule = createActivityModule({ tokens: auth.tokens });
   const { service: activity } = activityModule;
 
-  // Monetization: the entitlement module owns the source-of-truth services and
-  // the authoritative enforcement (limits/guard). Built before the trip module
-  // so trip creation can enforce the free-tier group limit server-side.
-  const entitlement = createEntitlementModule();
-
   const trips = createTripModule({ tokens: auth.tokens, activity, limits: entitlement.limits });
+
+  // Rewarded-ad unlock endpoints, mounted at `/me` (shares the mount with the
+  // dashboard router).
+  const rewardRouter = createRewardRouter({
+    controller: new RewardController(entitlement.rewards),
+    tokens: auth.tokens,
+  });
   // Settlements are built first so the Expense module can read from the
   // same repository when computing balances — no double-wiring.
   const settlements = createSettlementModule({ tokens: auth.tokens, notifications, activity });
@@ -69,6 +80,7 @@ export function createApiRouter(): Router {
   router.use('/notifications', notificationModule.router);
   router.use('/activity', activityModule.router);
   router.use('/me', dashboard.router);
+  router.use('/me', rewardRouter);
   router.use('/subscriptions', subscription.router);
 
   return router;

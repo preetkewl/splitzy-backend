@@ -10,7 +10,13 @@ export function isProfileComplete(user: Pick<User, 'name' | 'phone'>): boolean {
   );
 }
 
-export function toUserDto(user: User): UserDto {
+/** The group-allowance hint surfaced on the user object (effective cap + reward state). */
+export interface GroupAllowanceDto {
+  limit: number;
+  rewardAvailable: boolean;
+}
+
+export function toUserDto(user: User, allowance?: GroupAllowanceDto): UserDto {
   return {
     id: user.id,
     firebaseUid: user.firebaseUid,
@@ -23,6 +29,9 @@ export function toUserDto(user: User): UserDto {
     upiId: user.upiId,
     profileComplete: isProfileComplete(user),
     isPremium: user.isPremium,
+    ...(allowance
+      ? { groupLimit: allowance.limit, groupRewardAvailable: allowance.rewardAvailable }
+      : {}),
     createdAt: user.createdAt.toISOString(),
     updatedAt: user.updatedAt.toISOString(),
   };

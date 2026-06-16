@@ -19,7 +19,7 @@ import type {
   UpdateProfileInput,
   UserDto,
 } from '../dto/index.js';
-import { toUserDto } from '../mapper/user.mapper.js';
+import { toUserDto, type GroupAllowanceDto } from '../mapper/user.mapper.js';
 import type { IRefreshTokenRepository } from '../repository/refresh-token.repository.js';
 import type { IUserRepository } from '../repository/user.repository.js';
 import type { TokenService } from './token.service.js';
@@ -29,12 +29,34 @@ export interface AuthServiceContext {
   ipAddress?: string | null;
 }
 
+/**
+ * Resolves a user's group allowance so it can ride on the user object. Injected
+ * (not imported) to keep the auth module decoupled from the entitlement module.
+ */
+export type GroupAllowanceResolver = (userId: string) => Promise<GroupAllowanceDto>;
+
 export class AuthService {
   constructor(
     private readonly users: IUserRepository,
     private readonly refreshTokens: IRefreshTokenRepository,
     private readonly tokens: TokenService,
+    private readonly groupAllowance?: GroupAllowanceResolver,
   ) {}
+
+  /**
+   * Best-effort allowance lookup for the user DTO. Failures (e.g. transient DB
+   * error) are swallowed so login / `me` never break on the optional hint — the
+   * client falls back to its default cap and server-side enforcement still holds.
+   */
+  private async resolveAllowance(userId: string): Promise<GroupAllowanceDto | undefined> {
+    if (this.groupAllowance === undefined) return undefined;
+    try {
+      return await this.groupAllowance(userId);
+    } catch (err) {
+      logger.warn({ err, userId }, 'group allowance lookup failed; omitting from user dto');
+      return undefined;
+    }
+  }
 
   // ── Google Sign-In ────────────────────────────────────────────────────────
 
@@ -104,7 +126,7 @@ export class AuthService {
     if (user === null) {
       throw new ApiError(HTTP.UNAUTHORIZED, ERROR_CODES.UNAUTHORIZED, 'User not found');
     }
-    return toUserDto(user);
+    return toUserDto(user, await this.resolveAllowance(userId));
   }
 
   // ── Profile ───────────────────────────────────────────────────────────────
@@ -133,7 +155,7 @@ export class AuthService {
     if (input.phone !== undefined) update.phone = input.phone;
 
     const updated = await this.users.update(userId, update);
-    return toUserDto(updated);
+    return toUserDto(updated, await this.resolveAllowance(userId));
   }
 
   // ── Delete account ────────────────────────────────────────────────────────
@@ -287,7 +309,7 @@ export class AuthService {
       ipAddress: ctx.ipAddress ?? null,
     });
     return {
-      user: toUserDto(user),
+      user: toUserDto(user, await this.resolveAllowance(user.id)),
       accessToken: pair.accessToken,
       accessTokenExpiresAt: pair.accessTokenExpiresAt.toISOString(),
       refreshToken: pair.refreshToken,

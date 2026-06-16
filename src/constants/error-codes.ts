@@ -21,6 +21,8 @@ export const ERROR_CODES = {
   // Monetization / entitlement enforcement (Phase 3)
   PREMIUM_REQUIRED: 'PREMIUM_REQUIRED',
   FREE_GROUP_LIMIT_REACHED: 'FREE_GROUP_LIMIT_REACHED',
+  // Premium users have a hard cap too (no upsell beyond it).
+  PREMIUM_GROUP_LIMIT_REACHED: 'PREMIUM_GROUP_LIMIT_REACHED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

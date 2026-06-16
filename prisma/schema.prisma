@@ -139,8 +139,14 @@ enum ActivityEntityType {
 /// Abstract capability a user can hold. Source-agnostic: PREMIUM can be granted
 /// by a subscription today and by a reward/admin grant later. Extensible
 /// (e.g. NO_ADS, UNLIMITED_TRIPS) without reshaping the entitlement tables.
+///
+/// EXTRA_GROUP_SLOT is a granular, reward-only capability: watching a rewarded
+/// ad grants ONE permanent extra group slot (free tier: 2 → 3). It is
+/// deliberately NOT PREMIUM, so a reward unlock can never be mistaken for a full
+/// premium grant by any future reward→entitlement materializer.
 enum EntitlementType {
   PREMIUM
+  EXTRA_GROUP_SLOT
 }
 
 /// Where an entitlement came from. Only SUBSCRIPTION is exercised in Phase 2A;

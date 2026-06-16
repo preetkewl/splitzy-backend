@@ -74,17 +74,37 @@ export const QUOTA_KEYS = {
 
 export type QuotaKey = (typeof QUOTA_KEYS)[keyof typeof QUOTA_KEYS];
 
+/** Reward-unlock types (the `reward_unlocks.rewardType` discriminator). */
+export const REWARD_TYPES = {
+  /** One rewarded-ad watch → one permanent extra group slot. */
+  EXTRA_GROUP: 'extra_group',
+} as const;
+
+export type RewardType = (typeof REWARD_TYPES)[keyof typeof REWARD_TYPES];
+
 /**
- * Free users may OWN this many active (non-deleted) groups/trips. Premium users
- * are unlimited. Expense logging is deliberately NOT limited — it is the core
+ * Free users may OWN this many active (non-deleted) groups/trips before any
+ * reward unlock. Expense logging is deliberately NOT limited — it is the core
  * retention loop.
  *
- * ⚠️ The Flutter client currently uses kFreeGroupLimit = 3; the backend is now
- * authoritative at 2 per the Phase-3 product rules. The frontend must be aligned
- * in a later phase — until then the backend rejects a free user's 3rd group with
- * a structured FREE_GROUP_LIMIT_REACHED error the paywall can consume.
+ * The effective free limit is FREE_ACTIVE_GROUP_LIMIT + the user's earned
+ * reward slots (capped at MAX_FREE_REWARD_GROUP_SLOTS), so a free user can reach
+ * 3 active groups after watching one rewarded ad.
  */
 export const FREE_ACTIVE_GROUP_LIMIT = 2;
+
+/**
+ * How many extra group slots a free user can earn from rewarded ads. One ad →
+ * one permanent slot → effective free cap of 3. Raising this lets a free user
+ * stack more ad-unlocked slots without any other code change.
+ */
+export const MAX_FREE_REWARD_GROUP_SLOTS = 1;
+
+/**
+ * Premium users are capped at this many active (non-deleted) owned groups.
+ * Previously unlimited; now a hard cap (no reward upsell beyond this).
+ */
+export const PREMIUM_ACTIVE_GROUP_LIMIT = 10;
 
 // Re-export the Prisma-generated enums under a single import surface so callers
 // never reach into '@prisma/client' for monetization vocabulary directly.

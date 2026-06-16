@@ -51,6 +51,7 @@ import type {
 import { ActivityService } from '../../src/modules/activity/index.js';
 import type { ActivityRepository } from '../../src/modules/activity/index.js';
 import type { LimitEvaluationService } from '../../src/modules/entitlement/service/limit-evaluation.service.js';
+import { PREMIUM_ACTIVE_GROUP_LIMIT } from '../../src/modules/entitlement/constants.js';
 import type { IDeviceTokenRepository } from '../../src/modules/notification/repository/device-token.repository.js';
 import { NotificationService } from '../../src/modules/notification/service/notification.service.js';
 import type { SettlementWithUsers } from '../../src/modules/settlement/mapper/settlement.mapper.js';
@@ -1013,6 +1014,12 @@ export function buildActivityService(): ActivityService {
 export function buildNoopLimits(): LimitEvaluationService {
   return {
     enforceGroupCreation: async () => {},
-    evaluateGroupCreation: async () => ({ allowed: true, premium: true, usage: null, limit: null }),
+    evaluateGroupCreation: async () => ({
+      allowed: true,
+      premium: true,
+      usage: 0,
+      limit: PREMIUM_ACTIVE_GROUP_LIMIT,
+      rewardAvailable: false,
+    }),
   } as unknown as LimitEvaluationService;
 }

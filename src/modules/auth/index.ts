@@ -5,7 +5,7 @@ import { AuthController } from './controller/auth.controller.js';
 import { RefreshTokenRepository } from './repository/refresh-token.repository.js';
 import { UserRepository } from './repository/user.repository.js';
 import { createAuthRouter } from './routes/auth.routes.js';
-import { AuthService } from './service/auth.service.js';
+import { AuthService, type GroupAllowanceResolver } from './service/auth.service.js';
 import { TokenService } from './service/token.service.js';
 
 export interface AuthModule {
@@ -14,7 +14,12 @@ export interface AuthModule {
   tokens: TokenService;
 }
 
-export function createAuthModule(): AuthModule {
+export interface AuthModuleOptions {
+  /** Resolves the group allowance surfaced on the user object (/auth/me + login). */
+  groupAllowance?: GroupAllowanceResolver;
+}
+
+export function createAuthModule(opts: AuthModuleOptions = {}): AuthModule {
   const tokens = new TokenService({
     secret: env.JWT_SECRET,
     accessExpiresIn: env.JWT_ACCESS_EXPIRES_IN,
@@ -24,13 +29,14 @@ export function createAuthModule(): AuthModule {
     new UserRepository(prisma),
     new RefreshTokenRepository(prisma),
     tokens,
+    opts.groupAllowance,
   );
   const controller = new AuthController(service);
   const router = createAuthRouter({ controller, tokens });
   return { router, service, tokens };
 }
 
-export { AuthService } from './service/auth.service.js';
+export { AuthService, type GroupAllowanceResolver } from './service/auth.service.js';
 export { TokenService } from './service/token.service.js';
 export { AuthController } from './controller/auth.controller.js';
 export { UserRepository } from './repository/user.repository.js';

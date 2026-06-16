@@ -10,6 +10,14 @@ export interface UserDto {
   upiId: string | null;
   profileComplete: boolean;
   isPremium: boolean;
+  /**
+   * Effective max active owned groups (free: 2 + earned reward slots, capped at
+   * 3; premium: 10). Populated on /auth/me + login; omitted if the allowance
+   * lookup is unavailable, in which case the client falls back to its default.
+   */
+  groupLimit?: number;
+  /** Free tier only: true if the user can unlock one more group via a rewarded ad. */
+  groupRewardAvailable?: boolean;
   createdAt: string;
   updatedAt: string;
 }
