@@ -22,7 +22,9 @@ const envSchema = z.object({
   FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),
 
   // ── Google Play Developer API (subscription verification) ────────────────────
-  // The Android application id whose subscriptions we verify (e.g. com.settlio.app).
+  // The Android application id whose subscriptions we verify. MUST match the
+  // Play Console app + the Flutter `applicationId` (com.hk.settlio) — a
+  // mismatch makes every purchases.subscriptionsv2.get 404 → verify fails.
   GOOGLE_PLAY_PACKAGE_NAME: z.string().optional(),
   // Full service-account JSON (single env var, mirrors FIREBASE_SERVICE_ACCOUNT_JSON).
   // The account needs the "View financial data / Manage orders" permission in

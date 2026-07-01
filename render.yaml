@@ -1,0 +1,48 @@
+# Render Blueprint — monetization ops Cron Jobs.
+#
+# These are the billing SAFETY NET (see docs/monetization-ops-runbook.md §4):
+#   • ack-purchases          — hourly. Google auto-refunds a purchase that is
+#                              not acknowledged within 3 days; this reprocesses
+#                              any purchase whose inline ack failed.
+#   • reconcile-subscriptions — daily. Re-derives every non-terminal purchase
+#                              from Google (subscriptionsv2.get) to repair drift
+#                              from dropped/delayed RTDN (renewals, cancels,
+#                              lapses, refunds).
+#
+# NOTES
+#   • This file declares ONLY the cron jobs — it does NOT redeclare the web
+#     API service, so applying it cannot clobber your existing Render web
+#     service. Keep the web service as-is (dashboard or its own blueprint).
+#   • Both jobs reuse the SAME Dockerfile; `dockerCommand` overrides the
+#     entrypoint so they run the sweep directly (no server, no db push).
+#   • They read config from the shared env group `settlio-backend` — create it
+#     in Render (Env Groups) with the SAME values as the web service, especially
+#     DATABASE_URL, GOOGLE_PLAY_PACKAGE_NAME (com.hk.settlio) and
+#     GOOGLE_PLAY_SERVICE_ACCOUNT_JSON. Without these the sweeps fail closed.
+#
+# To apply: Render Dashboard → Blueprints → New Blueprint Instance → this repo.
+
+services:
+  - type: cron
+    name: settlio-ack-purchases
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Hourly, on the hour.
+    schedule: "0 * * * *"
+    dockerCommand: npx tsx scripts/ack-purchases.ts --limit=500
+    envVarGroups:
+      - settlio-backend
+
+  - type: cron
+    name: settlio-reconcile-subscriptions
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Daily at 03:30 UTC (off-peak).
+    schedule: "30 3 * * *"
+    dockerCommand: npx tsx scripts/reconcile-subscriptions.ts --limit=500
+    envVarGroups:
+      - settlio-backend

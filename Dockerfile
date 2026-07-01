@@ -53,7 +53,10 @@ COPY --from=build --chown=app:app /app/package.json ./package.json
 # src/ is needed at runtime so `tsx prisma/seed.ts` can resolve its
 # `../src/...` imports during one-off seeding.
 COPY --from=build --chown=app:app /app/src ./src
-COPY --from=build --chown=app:app /app/scripts/render-entrypoint.sh ./scripts/render-entrypoint.sh
+# Whole scripts/ dir — the entrypoint plus the ops sweeps
+# (ack-purchases / reconcile-subscriptions) that Render Cron Jobs run via
+# `tsx scripts/…`. Copying only the entrypoint would leave those missing.
+COPY --from=build --chown=app:app /app/scripts ./scripts
 
 USER app
 

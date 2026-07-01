@@ -13,6 +13,13 @@ function parseOrigins(raw: string): string[] | '*' {
 
 const origins = parseOrigins(env.CORS_ORIGINS);
 
+// Credentials are enabled ONLY for an explicit allowlist. Reflecting *any*
+// origin while allowing credentials is an anti-pattern (and wildcard + creds is
+// invalid per the CORS spec). The mobile app authenticates with
+// `Authorization: Bearer …`, not cookies, so it never needs CORS credentials —
+// wildcard mode is for local/dev where no browser origin is trusted anyway.
+const allowCredentials = origins !== '*';
+
 const corsOptions: CorsOptions = {
   origin:
     origins === '*'
@@ -21,7 +28,7 @@ const corsOptions: CorsOptions = {
           if (!incoming || origins.includes(incoming)) cb(null, true);
           else cb(new Error(`Origin not allowed by CORS: ${incoming}`));
         },
-  credentials: true,
+  credentials: allowCredentials,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With'],
   exposedHeaders: ['RateLimit', 'RateLimit-Policy', 'Retry-After'],

@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express';
+import { ApiError } from '../../../core/api-error.js';
 import { ApiResponse } from '../../../core/api-response.js';
 import { asyncHandler } from '../../../core/async-handler.js';
 import type { SubscriptionService } from '../service/subscription.service.js';
@@ -10,9 +11,11 @@ export class SubscriptionController {
   constructor(private readonly service: SubscriptionService) {}
 
   private requireUserId(req: Request): string {
-    const userId = (req as Request & { userId?: string }).userId;
-    if (!userId) throw new Error('Unauthorized');
-    return userId;
+    // `requireAuth` sets `req.user = { id }`. Read it there — NOT `req.userId`,
+    // which nothing sets (that bug made every verify throw → 500, so no purchase
+    // was ever bound to a user and premium could never be granted).
+    if (req.user === undefined) throw ApiError.unauthorized('Auth middleware did not run');
+    return req.user.id;
   }
 
   verify = asyncHandler(async (req: TypedRequest<VerifySubscriptionBody>, res: Response) => {
