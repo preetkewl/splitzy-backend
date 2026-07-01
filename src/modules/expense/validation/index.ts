@@ -444,12 +444,32 @@ export const listExpensesQuerySchema = z.object({
   pageSize: z.coerce.number().int().positive().max(100).optional(),
 });
 
+/**
+ * Query schema for GET /trips/:tripId/balances.
+ *
+ * `simplify` (premium-only): when '1' or 'true', the response additionally
+ * includes the minimum-transfer `suggestedTransfers`. Query params arrive as
+ * strings, so we normalise explicitly rather than using z.coerce.boolean()
+ * (which treats the string "false"/"0" as truthy). Absent → undefined →
+ * treated as false by the controller. The premium gate itself lives in the
+ * controller, not here.
+ */
+export const balancesQuerySchema = z.object({
+  simplify: z
+    .preprocess(
+      (v) => (v === undefined ? undefined : v === '1' || v === 'true' || v === true),
+      z.boolean().optional(),
+    )
+    .optional(),
+});
+
 // ── Exported types ────────────────────────────────────────────────────────────
 
 export type CreateExpenseBody = z.infer<typeof createExpenseBodySchema>;
 export type TripIdParam = z.infer<typeof tripIdParamSchema>;
 export type ExpenseIdParam = z.infer<typeof expenseIdParamSchema>;
 export type ListExpensesQuery = z.infer<typeof listExpensesQuerySchema>;
+export type BalancesQuery = z.infer<typeof balancesQuerySchema>;
 
 // Named exports for the individual participant schemas — used by contract tests
 // to validate schema shapes in isolation.

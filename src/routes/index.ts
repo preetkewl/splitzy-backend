@@ -56,6 +56,7 @@ export function createApiRouter(): Router {
     settlements: settlements.repository,
     notifications,
     activity,
+    entitlement: entitlement.middleware,
   });
   const friends = createFriendModule({ tokens: auth.tokens, notifications, activity });
   const subscription = createSubscriptionModule({

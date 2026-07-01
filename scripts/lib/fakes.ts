@@ -9,6 +9,7 @@
  *   - cascading deletes for trip → members
  */
 import { randomUUID } from 'node:crypto';
+import type { RequestHandler } from 'express';
 import type {
   Activity,
   DeviceToken,
@@ -50,6 +51,7 @@ import type {
 } from '../../src/modules/friend/repository/friend.repository.js';
 import { ActivityService } from '../../src/modules/activity/index.js';
 import type { ActivityRepository } from '../../src/modules/activity/index.js';
+import type { EntitlementMiddleware } from '../../src/modules/entitlement/index.js';
 import type { LimitEvaluationService } from '../../src/modules/entitlement/service/limit-evaluation.service.js';
 import { PREMIUM_ACTIVE_GROUP_LIMIT } from '../../src/modules/entitlement/constants.js';
 import type { IDeviceTokenRepository } from '../../src/modules/notification/repository/device-token.repository.js';
@@ -1022,4 +1024,38 @@ export function buildNoopLimits(): LimitEvaluationService {
       rewardAvailable: false,
     }),
   } as unknown as LimitEvaluationService;
+}
+
+/**
+ * Fake entitlement middleware for smoke tests. Attaches a premium snapshot to
+ * `req.entitlement` so premium gates can be exercised without the entitlement
+ * DB.
+ *
+ * When `opts.premium` is set, that fixed value is used for every request. When
+ * omitted, premium is driven per-request by the `x-test-premium: 1` header —
+ * letting a single app instance exercise BOTH the free (default) and premium
+ * paths by varying the header.
+ */
+export function buildEntitlementMiddleware(opts: { premium?: boolean } = {}): EntitlementMiddleware {
+  const resolve = (req: Parameters<RequestHandler>[0]): { premium: boolean; premiumExpiresAt: null } => ({
+    premium: opts.premium ?? req.header('x-test-premium') === '1',
+    premiumExpiresAt: null,
+  });
+  const resolveEntitlement: RequestHandler = (req, _res, next) => {
+    req.entitlement = resolve(req);
+    next();
+  };
+  const requirePremium: RequestHandler = (req, res, next) => {
+    const snapshot = resolve(req);
+    req.entitlement = snapshot;
+    if (!snapshot.premium) {
+      res.status(403).json({
+        success: false,
+        error: { code: 'PREMIUM_REQUIRED', message: 'This feature requires Settlio Premium.' },
+      });
+      return;
+    }
+    next();
+  };
+  return { requirePremium, optionalPremium: resolveEntitlement, resolveEntitlement };
 }

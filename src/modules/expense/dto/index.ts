@@ -199,6 +199,18 @@ export interface BalanceSummaryDto {
   totalAmountMinor: number;
   totalReimbursedMinor: number;
   members: MemberBalanceDto[];
+  /**
+   * Per-pair NET debts — the real "who owes whom", preserving counterparties
+   * (e.g. "Harpal → Kanwarpreet ₹125" AND "Harpal → Honey ₹300"). Always
+   * present; this is the default settle-up view for every user.
+   */
+  pairwiseTransfers: SettlementSuggestionDto[];
+  /**
+   * Greedy minimum-transfer plan (fewest payments; may reroute a debt to a
+   * different creditor than the originating expense). PREMIUM-ONLY: populated
+   * only when the caller holds active premium AND requested `?simplify=1`.
+   * Empty array for free users or when simplification was not requested.
+   */
   suggestedTransfers: SettlementSuggestionDto[];
 }
 

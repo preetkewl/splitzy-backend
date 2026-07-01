@@ -38,6 +38,7 @@ import {
   FakeTripRepository,
   FakeUserRepository,
   buildActivityService,
+  buildEntitlementMiddleware,
   buildNoopLimits,
   buildNotificationService,
 } from './lib/fakes.js';
@@ -77,6 +78,7 @@ async function buildApp(): Promise<TestApp> {
   const exp = createExpenseRouters({
     controller: new ExpenseController(expenseService),
     tokens,
+    entitlement: buildEntitlementMiddleware(),
   });
   const set = createSettlementRouters({
     controller: new SettlementController(settlementService),
@@ -162,12 +164,18 @@ type BalancesData = {
   totalAmountMinor: number;
   totalReimbursedMinor: number;
   members: { userId: string; netMinor: number }[];
+  // Default (free-tier) view. The Goa fixture is single-creditor, so pairwise
+  // and the premium simplified view coincide throughout the settlement flow.
+  pairwiseTransfers: { fromUserId: string; toUserId: string; amountMinor: number }[];
   suggestedTransfers: { fromUserId: string; toUserId: string; amountMinor: number }[];
 };
 
 async function fetchBalances(app: TestApp, token: string, tripId: string): Promise<BalancesData> {
-  const res = await app.fetchJson(`/api/v1/trips/${tripId}/balances`, {
-    headers: authHeaders(token),
+  // This suite drives the settle-down flow off the minimum-transfer plan, so it
+  // requests the premium simplified view (`?simplify=1` + premium header). The
+  // separate expense smoke covers the free-tier pairwise default and the gate.
+  const res = await app.fetchJson(`/api/v1/trips/${tripId}/balances?simplify=1`, {
+    headers: { ...authHeaders(token), 'x-test-premium': '1' },
   });
   if (!isSuccess<BalancesData>(res.body)) throw new Error('balances fetch failed');
   return res.body.data;
@@ -423,7 +431,7 @@ async function main(): Promise<void> {
   }
 
   console.log('\n· complete settlement of remaining balances zeros everyone');
-  // Use the *current* suggested transfers as the settlement plan.
+  // Use the *current* simplified transfers as the settlement plan.
   const suggested = after3.suggestedTransfers;
   check('still 3 suggested transfers after partial', suggested.length === 3);
   for (const t of suggested) {

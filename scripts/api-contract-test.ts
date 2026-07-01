@@ -776,6 +776,7 @@ heading('Response DTO shape (TypeScript type assertions)');
     totalAmountMinor: 300_000,
     totalReimbursedMinor: 0,
     members: [memberBalance],
+    pairwiseTransfers: [suggestion],
     suggestedTransfers: [suggestion],
   };
   check('BalanceSummaryDto constructs correctly', balanceSummary.members.length === 1);

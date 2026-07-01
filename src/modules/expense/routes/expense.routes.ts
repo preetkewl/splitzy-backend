@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import { requireAuth, validateRequest } from '../../../middlewares/index.js';
 import type { TokenService } from '../../auth/service/token.service.js';
+import type { EntitlementMiddleware } from '../../entitlement/index.js';
 import type { ExpenseController } from '../controller/expense.controller.js';
 import {
+  balancesQuerySchema,
   createExpenseBodySchema,
   expenseIdParamSchema,
   listExpensesQuerySchema,
@@ -12,6 +14,8 @@ import {
 export interface ExpenseRouterDeps {
   controller: ExpenseController;
   tokens: TokenService;
+  /** Attaches `req.entitlement` so the balances route can gate the premium view. */
+  entitlement: EntitlementMiddleware;
 }
 
 export interface ExpenseRouters {
@@ -46,7 +50,10 @@ export function createExpenseRouters(deps: ExpenseRouterDeps): ExpenseRouters {
   );
   tripScopedRouter.get(
     '/:tripId/balances',
-    validateRequest({ params: tripIdParamSchema }),
+    validateRequest({ params: tripIdParamSchema, query: balancesQuerySchema }),
+    // Non-blocking: resolves premium state onto req.entitlement. The controller
+    // enforces the gate only when ?simplify=1 is requested.
+    deps.entitlement.resolveEntitlement,
     deps.controller.balancesForTrip,
   );
 

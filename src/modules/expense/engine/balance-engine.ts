@@ -77,6 +77,49 @@ export interface SettlementTransfer {
   amountMinor: number;
 }
 
+// ── Shared validation ─────────────────────────────────────────────────────────
+
+/**
+ * Assert an expense is internally consistent: at least one payment, positive
+ * integer contributions with no duplicate contributor, and both the payment
+ * contributions and the participant shares summing to amountMinor.
+ *
+ * [computeNetBalances] inlines the equivalent checks in its accumulation loop;
+ * [computePairwiseDebts] reuses this so the two primitives share one notion of
+ * "valid expense" and cannot diverge on what they accept.
+ */
+function assertExpenseIntegrity(expense: ExpenseInput): void {
+  if (expense.payments.length === 0) {
+    throw new Error('assertExpenseIntegrity: expense must have at least one payment');
+  }
+  const contributorsSeen = new Set<string>();
+  let contributionSum = 0;
+  for (const payment of expense.payments) {
+    if (!Number.isInteger(payment.contributionMinor) || payment.contributionMinor <= 0) {
+      throw new Error(
+        `assertExpenseIntegrity: contributionMinor must be a positive integer (got ${String(payment.contributionMinor)})`,
+      );
+    }
+    if (contributorsSeen.has(payment.userId)) {
+      throw new Error(`assertExpenseIntegrity: duplicate contributor '${payment.userId}' in expense`);
+    }
+    contributorsSeen.add(payment.userId);
+    contributionSum += payment.contributionMinor;
+  }
+  if (contributionSum !== expense.amountMinor) {
+    throw new Error(
+      `assertExpenseIntegrity: payment contributions (${String(contributionSum)}) do not sum to amount (${String(expense.amountMinor)})`,
+    );
+  }
+  let shareSum = 0;
+  for (const p of expense.participants) shareSum += p.shareMinor;
+  if (shareSum !== expense.amountMinor) {
+    throw new Error(
+      `assertExpenseIntegrity: participant shares (${String(shareSum)}) do not sum to amount (${String(expense.amountMinor)})`,
+    );
+  }
+}
+
 // ── Engine ───────────────────────────────────────────────────────────────────
 
 export const BalanceEngine = {
@@ -242,6 +285,116 @@ export const BalanceEngine = {
       result.push({ userId, netMinor });
     }
     return result;
+  },
+
+  /**
+   * Per-pair NET debts — "who owes whom" WITHOUT global minimisation.
+   *
+   * Unlike [simplify], this preserves the actual counterparty relationships:
+   * if Harpal owes Kanwarpreet ₹125 (from Kanwarpreet's expense) and ₹300 to
+   * Honey (from Honey's expenses), pairwise reports BOTH debts rather than
+   * routing everything to the single largest creditor. This is the free-tier /
+   * default view; [simplify] is the premium "reduce total transactions" view.
+   *
+   * Attribution per expense:
+   *   Each participant's shareMinor is owed to the payer(s) who covered the
+   *   expense. For the common single-payer expense this is exact: every
+   *   participant owes the sole payer their whole share. For multi-payer
+   *   expenses (Phase 4) the shares are decomposed across payers with a
+   *   deterministic transportation fill (north-west corner rule) that preserves
+   *   BOTH margins exactly — every participant owes exactly their share, and
+   *   every payer is owed exactly their contribution. The individual pairings
+   *   are one valid decomposition; each person's NET is exact regardless.
+   *
+   * Completed settlements shrink the payer's net debt to the receiver.
+   *
+   * Parity invariant (asserted by tests): for every user U,
+   *   SUM over all V of net(U → V) === −computeNetBalances(...)[U].netMinor
+   * i.e. the pairwise view always reconciles to the aggregate net, so the two
+   * code paths cannot drift.
+   *
+   * Output is deterministic: one transfer per non-zero pair, ordered by
+   * (fromUserId, toUserId) ASC. A self-pair never appears.
+   */
+  computePairwiseDebts(
+    memberIds: readonly string[],
+    expenses: readonly ExpenseInput[],
+    completedSettlements: readonly SettlementTransfer[] = [],
+  ): SettlementTransfer[] {
+    // debt[fromUserId][toUserId] = minor units `from` owes `to` (pre-netting).
+    const debt = new Map<string, Map<string, number>>();
+    const addDebt = (from: string, to: string, amountMinor: number): void => {
+      if (amountMinor <= 0 || from === to) return;
+      let inner = debt.get(from);
+      if (inner === undefined) {
+        inner = new Map<string, number>();
+        debt.set(from, inner);
+      }
+      inner.set(to, (inner.get(to) ?? 0) + amountMinor);
+    };
+
+    for (const expense of expenses) {
+      assertExpenseIntegrity(expense);
+
+      // Sort both dimensions by userId so the decomposition is independent of
+      // DB row order — same input always yields the same pairings.
+      const payers = [...expense.payments].sort((a, b) => a.userId.localeCompare(b.userId));
+      const participants = [...expense.participants].sort((a, b) => a.userId.localeCompare(b.userId));
+
+      // North-west corner transportation fill. Row margins = participant shares,
+      // column margins = payer contributions; both sum to amountMinor, so the
+      // fill terminates with every margin exactly consumed. Integer-only.
+      const colRemaining = payers.map((p) => p.contributionMinor);
+      for (const participant of participants) {
+        let rowRemaining = participant.shareMinor;
+        for (let q = 0; q < payers.length && rowRemaining > 0; q += 1) {
+          const available = colRemaining[q] ?? 0;
+          if (available <= 0) continue;
+          const take = rowRemaining < available ? rowRemaining : available;
+          addDebt(participant.userId, payers[q]!.userId, take);
+          rowRemaining -= take;
+          colRemaining[q] = available - take;
+        }
+      }
+    }
+
+    for (const s of completedSettlements) {
+      if (!Number.isInteger(s.amountMinor) || s.amountMinor <= 0) {
+        throw new Error(
+          `computePairwiseDebts: settlement amountMinor must be a positive integer (got ${String(s.amountMinor)})`,
+        );
+      }
+      if (s.fromUserId === s.toUserId) {
+        throw new Error('computePairwiseDebts: settlement fromUserId must differ from toUserId');
+      }
+      // The payer (fromUserId) settled a debt to the receiver (toUserId); crediting
+      // the reverse direction shrinks their net debt by amountMinor (may flip sign
+      // if they overpaid, in which case the receiver ends up owing them).
+      addDebt(s.toUserId, s.fromUserId, s.amountMinor);
+    }
+
+    // Collect every userId that appears anywhere, for a stable pair iteration.
+    const ids = new Set<string>(memberIds);
+    for (const [from, inner] of debt) {
+      ids.add(from);
+      for (const to of inner.keys()) ids.add(to);
+    }
+    const sortedIds = [...ids].sort((a, b) => a.localeCompare(b));
+
+    const transfers: SettlementTransfer[] = [];
+    for (let i = 0; i < sortedIds.length; i += 1) {
+      for (let j = i + 1; j < sortedIds.length; j += 1) {
+        const a = sortedIds[i]!;
+        const b = sortedIds[j]!;
+        const net = (debt.get(a)?.get(b) ?? 0) - (debt.get(b)?.get(a) ?? 0);
+        if (net > 0) {
+          transfers.push({ fromUserId: a, toUserId: b, amountMinor: net });
+        } else if (net < 0) {
+          transfers.push({ fromUserId: b, toUserId: a, amountMinor: -net });
+        }
+      }
+    }
+    return transfers;
   },
 
   /**

@@ -1,11 +1,14 @@
 import { ExpenseSplitType } from '@prisma/client';
 import type { Request, Response } from 'express';
+import { ERROR_CODES } from '../../../constants/error-codes.js';
+import { HTTP } from '../../../constants/http.js';
 import { ApiError } from '../../../core/api-error.js';
 import { ApiResponse } from '../../../core/api-response.js';
 import { asyncHandler } from '../../../core/async-handler.js';
 import type { CreateExpenseInput } from '../dto/index.js';
 import type { ExpenseService } from '../service/expense.service.js';
 import type {
+  BalancesQuery,
   CreateExpenseBody,
   ExpenseIdParam,
   ListExpensesQuery,
@@ -41,7 +44,25 @@ export class ExpenseController {
 
   balancesForTrip = asyncHandler(async (req: WithParams<TripIdParam>, res: Response) => {
     const userId = this.requireUserId(req);
-    const summary = await this.expenses.balances(userId, req.params.tripId);
+    const query = req.query as unknown as BalancesQuery;
+    const wantsSimplify = query.simplify === true;
+
+    // Server-authoritative premium gate: the minimum-transfer view is a paid
+    // feature. `req.entitlement` is attached by the resolveEntitlement
+    // middleware on this route. Free callers requesting simplification get a
+    // structured 403 the client turns into the paywall.
+    if (wantsSimplify && req.entitlement?.premium !== true) {
+      throw new ApiError(
+        HTTP.FORBIDDEN,
+        ERROR_CODES.PREMIUM_REQUIRED,
+        'Simplified settle-up is a Settlio Premium feature.',
+        { meta: { premium: false } },
+      );
+    }
+
+    const summary = await this.expenses.balances(userId, req.params.tripId, {
+      includeSimplified: wantsSimplify,
+    });
     return ApiResponse.ok(res, summary);
   });
 

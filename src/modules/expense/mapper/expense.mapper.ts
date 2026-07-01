@@ -132,12 +132,16 @@ export function toBalanceSummary(input: {
   totalAmountMinor: number;
   totalReimbursedMinor: number;
   members: MemberBalanceDto[];
-  transfers: readonly SettlementTransfer[];
+  /** Per-pair net debts — always returned (default view). */
+  pairwiseTransfers: readonly SettlementTransfer[];
+  /** Minimum-transfer plan — premium-only; empty when not authorised/requested. */
+  simplifiedTransfers: readonly SettlementTransfer[];
 }): BalanceSummaryDto {
   return {
     totalAmountMinor: input.totalAmountMinor,
     totalReimbursedMinor: input.totalReimbursedMinor,
     members: input.members,
-    suggestedTransfers: input.transfers.map(toSettlementSuggestion),
+    pairwiseTransfers: input.pairwiseTransfers.map(toSettlementSuggestion),
+    suggestedTransfers: input.simplifiedTransfers.map(toSettlementSuggestion),
   };
 }

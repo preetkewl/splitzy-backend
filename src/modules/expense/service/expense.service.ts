@@ -245,7 +245,18 @@ export class ExpenseService {
 
   // ── balances ──────────────────────────────────────────────────────────────
 
-  async balances(userId: string, tripId: string): Promise<BalanceSummaryDto> {
+  /**
+   * @param opts.includeSimplified When true, also computes the greedy
+   *   minimum-transfer plan (`suggestedTransfers`). This is a PREMIUM feature —
+   *   the controller only sets it after verifying the caller holds active
+   *   premium, so the service stays entitlement-agnostic. When false (default)
+   *   `suggestedTransfers` is empty and only `pairwiseTransfers` is populated.
+   */
+  async balances(
+    userId: string,
+    tripId: string,
+    opts: { includeSimplified?: boolean } = {},
+  ): Promise<BalanceSummaryDto> {
     await this.access.assertMember(tripId, userId);
     const trip = await this.trips.findDetail(tripId);
     if (trip === null) throw ApiError.notFound('Trip not found');
@@ -307,7 +318,18 @@ export class ExpenseService {
       engineExpenses,
       completedTransfers,
     );
-    const transfers = BalanceEngine.simplify(netBalances);
+    // Per-pair "who owes whom" — always returned as the default settle-up view.
+    const pairwiseTransfers = BalanceEngine.computePairwiseDebts(
+      orderedMemberIds,
+      engineExpenses,
+      completedTransfers,
+    );
+    // Minimum-transfer plan — premium-only, computed only when the (verified)
+    // caller asked for it. Skipping it for free callers keeps the simplified
+    // data off the wire entirely (server-authoritative gate).
+    const simplifiedTransfers = opts.includeSimplified
+      ? BalanceEngine.simplify(netBalances)
+      : [];
 
     const userById = new Map<string, User>();
     for (const m of orderedMembers) userById.set(m.userId, m.user);
@@ -330,7 +352,8 @@ export class ExpenseService {
       totalAmountMinor,
       totalReimbursedMinor,
       members: memberBalances,
-      transfers,
+      pairwiseTransfers,
+      simplifiedTransfers,
     });
   }
 

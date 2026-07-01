@@ -39,7 +39,11 @@
  */
 
 import { BalanceEngine } from '../src/modules/expense/engine/balance-engine.js';
-import type { ExpenseInput, NetBalance } from '../src/modules/expense/engine/balance-engine.js';
+import type {
+  ExpenseInput,
+  NetBalance,
+  SettlementTransfer,
+} from '../src/modules/expense/engine/balance-engine.js';
 
 let failures = 0;
 function check(name: string, ok: boolean, detail?: unknown): void {
@@ -760,6 +764,195 @@ console.log('\n· deletion semantics (Phase 4E)');
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// computePairwiseDebts — per-pair "who owes whom" (default / free-tier view)
+//
+// Contrast with simplify: pairwise PRESERVES the real counterparties instead of
+// routing every debt to the largest creditor. These tests also assert the
+// parity invariant that ties pairwise back to computeNetBalances so the two
+// code paths can never drift.
+// ──────────────────────────────────────────────────────────────────────────────
+
+console.log('\n· computePairwiseDebts');
+
+/** Amount `from` owes `to` in a pairwise transfer list, or 0 if absent. */
+function pair(transfers: SettlementTransfer[], from: string, to: string): number {
+  return transfers.find((t) => t.fromUserId === from && t.toUserId === to)?.amountMinor ?? 0;
+}
+
+/**
+ * Parity check: for every user, (total they owe − total owed to them) in the
+ * pairwise view must equal the NEGATION of their aggregate net. This is the
+ * closed-form link between computePairwiseDebts and computeNetBalances.
+ */
+function pairwiseReconcilesToNet(
+  memberIds: string[],
+  expenses: ExpenseInput[],
+  settlements: SettlementTransfer[] = [],
+): boolean {
+  const net = BalanceEngine.computeNetBalances(memberIds, expenses, settlements);
+  const pw = BalanceEngine.computePairwiseDebts(memberIds, expenses, settlements);
+  return net.every((b) => {
+    const owes = pw.filter((t) => t.fromUserId === b.userId).reduce((s, t) => s + t.amountMinor, 0);
+    const owed = pw.filter((t) => t.toUserId === b.userId).reduce((s, t) => s + t.amountMinor, 0);
+    return owes - owed === -b.netMinor;
+  });
+}
+
+{
+  // The "middle person gets bypassed" crux — a miniature of the reported
+  // "Long weekend" bug. b sits between a and c:
+  //   Expense 1: b pays ₹200, split a/b → a owes b ₹100.
+  //   Expense 2: c pays ₹200, split b/c → b owes c ₹100.
+  // Pairwise keeps BOTH real debts (a→b, b→c). simplify collapses the chain to
+  // a single a→c ₹100 and drops b entirely — which is exactly why Harpal's
+  // "owes Kanwarpreet" debt disappeared on the settle-up screen.
+  const memberIds = ['a', 'b', 'c'];
+  const expenses: ExpenseInput[] = [
+    {
+      amountMinor: 200,
+      payments: [{ userId: 'b', contributionMinor: 200 }],
+      participants: [{ userId: 'a', shareMinor: 100 }, { userId: 'b', shareMinor: 100 }],
+    },
+    {
+      amountMinor: 200,
+      payments: [{ userId: 'c', contributionMinor: 200 }],
+      participants: [{ userId: 'b', shareMinor: 100 }, { userId: 'c', shareMinor: 100 }],
+    },
+  ];
+  const pw = BalanceEngine.computePairwiseDebts(memberIds, expenses);
+  check('bypass: pairwise keeps a → b 100', pair(pw, 'a', 'b') === 100, pw);
+  check('bypass: pairwise keeps b → c 100', pair(pw, 'b', 'c') === 100, pw);
+  check('bypass: pairwise has exactly 2 transfers', pw.length === 2, pw);
+
+  const simplified = BalanceEngine.simplify(BalanceEngine.computeNetBalances(memberIds, expenses));
+  check('bypass: simplify collapses to a → c 100', simplified.length === 1 && pair(simplified, 'a', 'c') === 100, simplified);
+  check('bypass: simplify drops b entirely', simplified.every((t) => t.fromUserId !== 'b' && t.toUserId !== 'b'), simplified);
+  check('bypass: pairwise reconciles to net', pairwiseReconcilesToNet(memberIds, expenses));
+}
+
+{
+  // Full "Long weekend" fixture (4 people, single-payer expenses):
+  //   honey pays ₹1200 split 4 ways (₹300 each).
+  //   kanwar pays ₹500 split 4 ways (₹125 each) → harpal owes kanwar ₹125.
+  // Pairwise must SHOW the harpal→kanwar ₹125 and harpal→honey ₹300 debts,
+  // whereas simplify nets kanwar's small credit away.
+  const memberIds = ['honey', 'kanwar', 'harpal', 'dev'];
+  const expenses: ExpenseInput[] = [
+    {
+      amountMinor: 1200,
+      payments: [{ userId: 'honey', contributionMinor: 1200 }],
+      participants: [
+        { userId: 'honey', shareMinor: 300 },
+        { userId: 'kanwar', shareMinor: 300 },
+        { userId: 'harpal', shareMinor: 300 },
+        { userId: 'dev', shareMinor: 300 },
+      ],
+    },
+    {
+      amountMinor: 500,
+      payments: [{ userId: 'kanwar', contributionMinor: 500 }],
+      participants: [
+        { userId: 'honey', shareMinor: 125 },
+        { userId: 'kanwar', shareMinor: 125 },
+        { userId: 'harpal', shareMinor: 125 },
+        { userId: 'dev', shareMinor: 125 },
+      ],
+    },
+  ];
+  const pw = BalanceEngine.computePairwiseDebts(memberIds, expenses);
+  check('long-weekend: pairwise harpal → kanwar 125 (preserved)', pair(pw, 'harpal', 'kanwar') === 125, pw);
+  check('long-weekend: pairwise harpal → honey 300 (preserved)', pair(pw, 'harpal', 'honey') === 300, pw);
+  check('long-weekend: pairwise kanwar → honey 175 (300 − 125 netted)', pair(pw, 'kanwar', 'honey') === 175, pw);
+  check('long-weekend: pairwise reconciles to net', pairwiseReconcilesToNet(memberIds, expenses));
+
+  const simplified = BalanceEngine.simplify(BalanceEngine.computeNetBalances(memberIds, expenses));
+  // simplify collects kanwar's +75 credit, so harpal's direct debt to kanwar is
+  // reduced below the real ₹125 — the crux of the user's complaint.
+  check('long-weekend: simplify reduces harpal → kanwar below 125', pair(simplified, 'harpal', 'kanwar') < 125, simplified);
+}
+
+{
+  // Settlements shrink the pairwise debt for that exact pair.
+  //   a owes b ₹100; a pays b ₹60 → pairwise a → b ₹40.
+  const memberIds = ['a', 'b'];
+  const expenses: ExpenseInput[] = [
+    {
+      amountMinor: 200,
+      payments: [{ userId: 'b', contributionMinor: 200 }],
+      participants: [{ userId: 'a', shareMinor: 100 }, { userId: 'b', shareMinor: 100 }],
+    },
+  ];
+  const settlements: SettlementTransfer[] = [{ fromUserId: 'a', toUserId: 'b', amountMinor: 60 }];
+  const pw = BalanceEngine.computePairwiseDebts(memberIds, expenses, settlements);
+  check('settlement: pairwise a → b reduced to 40', pair(pw, 'a', 'b') === 40, pw);
+  check('settlement: pairwise reconciles to net', pairwiseReconcilesToNet(memberIds, expenses, settlements));
+
+  // Over-payment flips the pair direction.
+  const over: SettlementTransfer[] = [{ fromUserId: 'a', toUserId: 'b', amountMinor: 130 }];
+  const pwOver = BalanceEngine.computePairwiseDebts(memberIds, expenses, over);
+  check('over-settlement: pairwise flips to b → a 30', pair(pwOver, 'b', 'a') === 30, pwOver);
+  check('over-settlement: pairwise reconciles to net', pairwiseReconcilesToNet(memberIds, expenses, over));
+}
+
+{
+  // Multi-payer decomposition preserves BOTH margins exactly.
+  //   Expense ₹100: payers a=₹60, b=₹40. Participants x=₹50, y=₹50.
+  // Each participant owes exactly their share; each payer is owed exactly
+  // their contribution. Integer-only, no drift.
+  const memberIds = ['a', 'b', 'x', 'y'];
+  const expenses: ExpenseInput[] = [
+    {
+      amountMinor: 100,
+      payments: [
+        { userId: 'a', contributionMinor: 60 },
+        { userId: 'b', contributionMinor: 40 },
+      ],
+      participants: [
+        { userId: 'x', shareMinor: 50 },
+        { userId: 'y', shareMinor: 50 },
+      ],
+    },
+  ];
+  const pw = BalanceEngine.computePairwiseDebts(memberIds, expenses);
+  // x owes 50 total, y owes 50 total; a owed 60, b owed 40.
+  const xOwes = pw.filter((t) => t.fromUserId === 'x').reduce((s, t) => s + t.amountMinor, 0);
+  const yOwes = pw.filter((t) => t.fromUserId === 'y').reduce((s, t) => s + t.amountMinor, 0);
+  const aOwed = pw.filter((t) => t.toUserId === 'a').reduce((s, t) => s + t.amountMinor, 0);
+  const bOwed = pw.filter((t) => t.toUserId === 'b').reduce((s, t) => s + t.amountMinor, 0);
+  check('multi-payer: x owes exactly 50 (row margin)', xOwes === 50, pw);
+  check('multi-payer: y owes exactly 50 (row margin)', yOwes === 50, pw);
+  check('multi-payer: a owed exactly 60 (col margin)', aOwed === 60, pw);
+  check('multi-payer: b owed exactly 40 (col margin)', bOwed === 40, pw);
+  check('multi-payer: pairwise reconciles to net', pairwiseReconcilesToNet(memberIds, expenses));
+}
+
+{
+  // Determinism: permuted expense/participant order yields identical pairwise output.
+  const memberIds = ['a', 'b', 'c'];
+  const e1: ExpenseInput = {
+    amountMinor: 300,
+    payments: [{ userId: 'a', contributionMinor: 300 }],
+    participants: [
+      { userId: 'a', shareMinor: 100 },
+      { userId: 'b', shareMinor: 100 },
+      { userId: 'c', shareMinor: 100 },
+    ],
+  };
+  const e1Permuted: ExpenseInput = {
+    amountMinor: 300,
+    payments: [{ userId: 'a', contributionMinor: 300 }],
+    participants: [
+      { userId: 'c', shareMinor: 100 },
+      { userId: 'a', shareMinor: 100 },
+      { userId: 'b', shareMinor: 100 },
+    ],
+  };
+  const p1 = BalanceEngine.computePairwiseDebts(memberIds, [e1]);
+  const p2 = BalanceEngine.computePairwiseDebts(memberIds, [e1Permuted]);
+  check('determinism: participant order does not change output', JSON.stringify(p1) === JSON.stringify(p2), { p1, p2 });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Randomized balance invariant (Phase 4H)
 //
 // For any combination of expenses (any split, any number of payers) and
@@ -809,6 +1002,7 @@ function buildRandomExpense(memberIds: string[]): ExpenseInput {
 
 const TRIAL_COUNT = 200;
 let invariantViolations = 0;
+let pairwiseParityViolations = 0;
 
 for (let trial = 0; trial < TRIAL_COUNT; trial++) {
   const memberCount = randomInt(3, 6);
@@ -831,12 +1025,32 @@ for (let trial = 0; trial < TRIAL_COUNT; trial++) {
     failures += 1;
     console.error(`  ✘ trial ${String(trial)}: SUM(net) = ${String(sum)} ≠ 0`, { net });
   }
+
+  // Pairwise view must reconcile to the aggregate net (per-user), including
+  // multi-payer decomposition and settlements. This is the guarantee that the
+  // free-tier pairwise screen and the premium simplify screen agree on totals.
+  const pw = BalanceEngine.computePairwiseDebts(memberIds, expenses, settlements);
+  const parityOk = net.every((b) => {
+    const owes = pw.filter((t) => t.fromUserId === b.userId).reduce((s, t) => s + t.amountMinor, 0);
+    const owed = pw.filter((t) => t.toUserId === b.userId).reduce((s, t) => s + t.amountMinor, 0);
+    return owes - owed === -b.netMinor;
+  });
+  if (!parityOk) {
+    pairwiseParityViolations += 1;
+    failures += 1;
+    console.error(`  ✘ trial ${String(trial)}: pairwise does not reconcile to net`, { net, pw });
+  }
 }
 
 check(
   `randomized: ${String(TRIAL_COUNT)} trials — SUM(net) === 0 in every trial`,
   invariantViolations === 0,
   invariantViolations > 0 ? { violations: invariantViolations } : undefined,
+);
+check(
+  `randomized: ${String(TRIAL_COUNT)} trials — pairwise reconciles to net in every trial`,
+  pairwiseParityViolations === 0,
+  pairwiseParityViolations > 0 ? { violations: pairwiseParityViolations } : undefined,
 );
 
 // ──────────────────────────────────────────────────────────────────────────────

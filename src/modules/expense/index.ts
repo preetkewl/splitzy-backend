@@ -3,6 +3,7 @@ import { prisma } from '../../database/prisma.js';
 import type { ActivityService } from '../activity/index.js';
 import { UserRepository } from '../auth/repository/user.repository.js';
 import type { TokenService } from '../auth/service/token.service.js';
+import type { EntitlementMiddleware } from '../entitlement/index.js';
 import type { NotificationService } from '../notification/service/notification.service.js';
 import { SettlementRepository } from '../settlement/repository/settlement.repository.js';
 import type { ISettlementRepository } from '../settlement/repository/settlement.repository.js';
@@ -29,6 +30,8 @@ export function createExpenseModule(deps: {
   settlements?: ISettlementRepository;
   notifications: NotificationService;
   activity: ActivityService;
+  /** Entitlement guards — used to gate the premium simplified-balances view. */
+  entitlement: EntitlementMiddleware;
 }): ExpenseModule {
   const expenseRepo = new ExpenseRepository(prisma);
   const tripRepo = new TripRepository(prisma);
@@ -46,6 +49,7 @@ export function createExpenseModule(deps: {
   const { rootRouter, tripScopedRouter } = createExpenseRouters({
     controller,
     tokens: deps.tokens,
+    entitlement: deps.entitlement,
   });
   return { rootRouter, tripScopedRouter, service };
 }

@@ -34,6 +34,7 @@ import {
   FakeTripRepository,
   FakeUserRepository,
   buildActivityService,
+  buildEntitlementMiddleware,
   buildNoopLimits,
   buildNotificationService,
 } from './lib/fakes.js';
@@ -69,7 +70,13 @@ async function buildApp(): Promise<TestApp> {
   app.use(express.json());
   app.use('/api/v1/auth', createAuthRouter({ controller: new AuthController(authService), tokens }));
   app.use('/api/v1/trips', createTripRouter({ controller: new TripController(tripService), tokens }));
-  const exp = createExpenseRouters({ controller: new ExpenseController(expenseService), tokens });
+  const exp = createExpenseRouters({
+    controller: new ExpenseController(expenseService),
+    tokens,
+    // Header-driven premium: default requests are free tier; add
+    // `x-test-premium: 1` to exercise the premium simplified view.
+    entitlement: buildEntitlementMiddleware(),
+  });
   app.use('/api/v1/trips', exp.tripScopedRouter);
   app.use('/api/v1/expenses', exp.rootRouter);
   app.use(notFoundHandler);
@@ -251,6 +258,7 @@ async function main(): Promise<void> {
     totalAmountMinor: number;
     totalReimbursedMinor: number;
     members: { userId: string; netMinor: number; totalPaidMinor: number; totalShareMinor: number }[];
+    pairwiseTransfers: { fromUserId: string; toUserId: string; amountMinor: number }[];
     suggestedTransfers: { fromUserId: string; toUserId: string; amountMinor: number }[];
   };
   if (isSuccess<BalancesData>(balances.body)) {
@@ -271,16 +279,52 @@ async function main(): Promise<void> {
     check('aarav totalPaid = 1480000', aarav_?.totalPaidMinor === 1_480_000);
     check('aarav totalShare = 631000', aarav_?.totalShareMinor === 631_000);
     check('every member is current', b.members.every((m) => 'isCurrentMember' in m));
-    check('3 suggested transfers', b.suggestedTransfers.length === 3);
+    // Default view is pairwise. The Goa fixture is MULTI-payer (aarya/meera/
+    // kabir each also paid), so pairwise carries debtor-to-debtor edges and is
+    // richer than the simplified plan. It must still reconcile to each member's
+    // net: (owes − owed) === −netMinor.
+    check('pairwise transfers are non-empty', b.pairwiseTransfers.length > 0);
+    const pairwiseReconciles = b.members.every((m) => {
+      const owes = b.pairwiseTransfers
+        .filter((t) => t.fromUserId === m.userId)
+        .reduce((s, t) => s + t.amountMinor, 0);
+      const owed = b.pairwiseTransfers
+        .filter((t) => t.toUserId === m.userId)
+        .reduce((s, t) => s + t.amountMinor, 0);
+      return owes - owed === -m.netMinor;
+    });
+    check('pairwise reconciles to each member net', pairwiseReconciles, b.pairwiseTransfers);
+    // Simplified view is premium-only; a free caller gets it empty by default.
+    check('suggestedTransfers empty for free caller (default)', b.suggestedTransfers.length === 0);
+  }
+
+  console.log('\n· simplified balances (premium ?simplify=1)');
+  const premiumBal = await app.fetchJson(`/api/v1/trips/${tripId}/balances?simplify=1`, {
+    headers: { ...authHeaders(meera.token), 'x-test-premium': '1' },
+  });
+  check('premium ?simplify=1 -> 200', premiumBal.status === 200);
+  if (isSuccess<BalancesData>(premiumBal.body)) {
+    const b = premiumBal.body.data;
+    // aarav is the sole net creditor, so the minimum-transfer plan is 3
+    // transfers all pointing at aarav, summing to his +849000 net.
+    check('3 simplified transfers', b.suggestedTransfers.length === 3);
     check(
-      'every transfer points at aarav',
+      'every simplified transfer points at aarav',
       b.suggestedTransfers.every((t) => t.toUserId === aarav.userId),
     );
     check(
-      'transfers SUM === aarav.netMinor',
+      'simplified transfers SUM === aarav.netMinor',
       b.suggestedTransfers.reduce((s, t) => s + t.amountMinor, 0) === 849_000,
     );
   }
+
+  console.log('\n· simplified balances are premium-gated');
+  const gated = await app.fetchJson(`/api/v1/trips/${tripId}/balances?simplify=1`, {
+    headers: authHeaders(meera.token),
+  });
+  check('free caller ?simplify=1 -> 403', gated.status === 403);
+  const gatedErr = gated.body as { error?: { code?: string } };
+  check('gate error code = PREMIUM_REQUIRED', gatedErr.error?.code === 'PREMIUM_REQUIRED', gated.body);
 
   console.log('\n· non-member sees 404 on balances/expenses');
   const stranger = await signIn(app, 'uid-stranger');
