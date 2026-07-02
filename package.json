@@ -39,6 +39,7 @@
     "smoke:verify-http": "tsx scripts/subscription-verify-http-smoke.ts",
     "smoke:rtdn": "tsx scripts/rtdn-smoke.ts",
     "smoke:enforcement": "tsx scripts/enforcement-smoke.ts",
+    "ops:verify-play-access": "tsx scripts/verify-play-access.ts",
     "smoke:all": "npm run smoke:http && npm run smoke:auth && npm run smoke:trip && npm run smoke:engine && npm run smoke:regression && npm run smoke:expense && npm run smoke:friend && npm run smoke:settlement && npm run smoke:dashboard && npm run smoke:entitlement && npm run smoke:verification && npm run smoke:verify-http && npm run smoke:rtdn && npm run smoke:enforcement",
     "prepare": "husky || true",
     "lint:no-paise": "! grep -rn --include='*.ts' '[Pp]aise' src scripts prisma/seed.ts 2>/dev/null || (echo 'ERROR: legacy paise terminology found — rename to minor units' && exit 1)"
