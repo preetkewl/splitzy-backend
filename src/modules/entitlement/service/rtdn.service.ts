@@ -8,7 +8,12 @@ import {
   SUB_NOTIFICATION,
   SUB_NOTIFICATION_NAME,
 } from '../google/rtdn-types.js';
-import { GooglePlayConfigError, InvalidPurchaseTokenError, UnknownProductError } from '../google/types.js';
+import {
+  GooglePlayConfigError,
+  InvalidPurchaseTokenError,
+  UnattributableTokenError,
+  UnknownProductError,
+} from '../google/types.js';
 import type { EntitlementRepository } from '../repository/entitlement.repository.js';
 import type { VerificationService } from './verification.service.js';
 
@@ -112,11 +117,39 @@ export class RtdnService {
     }
 
     // 4. Resolve the user from the existing purchase row. RTDN carries no userId.
+    const isRevoke = Boolean(voided) || notificationType === SUB_NOTIFICATION.REVOKED;
     const purchase = await this.repo.findPurchaseByToken(purchaseToken);
     if (!purchase) {
-      // We have never seen this token (e.g. RTDN arrived before verify). Record
-      // and ack to avoid a retry storm; the reconciliation sweep + a later verify
-      // re-derive truth, so no permanent drift.
+      // Unknown token. It may be a NEW token in an existing chain (a Play-
+      // initiated upgrade / downgrade / resubscribe issues a fresh token linked
+      // to the prior one). A non-revoke event triggers a chain migration:
+      // reconcileFromGoogle fetches Google, follows `linkedPurchaseToken` to the
+      // predecessor, inherits its owner, and migrates the subscription forward.
+      // A revoke of a token we've never recorded has nothing to act on.
+      if (!isRevoke) {
+        try {
+          const migrated = await this.migrateUnknownToken(purchaseToken);
+          if (migrated) {
+            await this.recordProcessed(msg.messageId, AuditEventType.RTDN_RECEIVED, purchaseToken, {
+              typeName,
+              migrated: true,
+            });
+            logger.info({ messageId: msg.messageId, typeName }, 'rtdn processed via chain migration');
+            incMetric(METRICS.rtdnProcessed, { typeName, revoke: false });
+            return { status: 'processed', notificationType: typeName, purchaseToken };
+          }
+        } catch (err) {
+          incMetric(METRICS.rtdnFailure, { typeName });
+          if (err instanceof GooglePlayConfigError) {
+            throw new RtdnRetryableError('verification not configured', err);
+          }
+          logger.error({ err, messageId: msg.messageId, typeName }, 'rtdn chain migration failed');
+          throw new RtdnRetryableError('rtdn chain migration failed', err);
+        }
+      }
+      // Truly unattributable (no chain / revoke of unknown). Record and ack to
+      // avoid a retry storm; the reconciliation sweep + a later verify re-derive
+      // truth, so no permanent drift.
       logger.warn({ messageId: msg.messageId, typeName }, 'rtdn for unknown purchase token');
       await this.recordProcessed(msg.messageId, AuditEventType.RTDN_RECEIVED, purchaseToken, {
         reason: 'unknown_purchase',
@@ -128,10 +161,9 @@ export class RtdnService {
 
     // 5. Route. Revoke is force-applied (does not depend on a Google fetch);
     //    everything else re-fetches Google and derives the authoritative state.
-    const isRevoke = Boolean(voided) || notificationType === SUB_NOTIFICATION.REVOKED;
     try {
       if (isRevoke) {
-        await this.verification.revokeByToken(purchase.userId, purchaseToken, AuditSource.RTDN);
+        await this.verification.revokeByToken(purchaseToken, AuditSource.RTDN);
       } else {
         await this.syncFromGoogle(purchase.userId, purchaseToken);
       }
@@ -154,6 +186,36 @@ export class RtdnService {
     return { status: 'processed', notificationType: typeName, purchaseToken };
   }
 
+  /**
+   * Attempt to migrate an unknown token onto an existing subscription chain via
+   * its Google `linkedPurchaseToken`. Returns true when the migration attributed
+   * and persisted the token (owner inherited from the predecessor), false when it
+   * is genuinely unattributable (no known predecessor) so the caller records it
+   * as `unknown_purchase`. Passing `assertedUserId = null` means ownership is
+   * derived purely from the chain — RTDN never invents an owner.
+   */
+  private async migrateUnknownToken(purchaseToken: string): Promise<boolean> {
+    try {
+      await this.verification.reconcileFromGoogle(null, purchaseToken, {
+        auditSource: AuditSource.RTDN,
+        successEvent: AuditEventType.PURCHASE_UPDATED,
+      });
+      return true;
+    } catch (err) {
+      // No known linked predecessor, or Google no longer recognizes the token →
+      // nothing to migrate. Treat as unattributable (not an error to retry).
+      if (err instanceof UnattributableTokenError || err instanceof InvalidPurchaseTokenError) {
+        return false;
+      }
+      // Unrecognized product on a token we can't otherwise place — don't retry.
+      if (err instanceof UnknownProductError) {
+        logger.error({ purchaseToken, productId: err.productId }, 'rtdn migration: unrecognized product');
+        return false;
+      }
+      throw err;
+    }
+  }
+
   /** Re-fetch Google and reconcile; if Google says the token is gone, expire it. */
   private async syncFromGoogle(userId: string, purchaseToken: string): Promise<void> {
     try {
@@ -164,7 +226,7 @@ export class RtdnService {
     } catch (err) {
       if (err instanceof InvalidPurchaseTokenError) {
         // Google no longer recognizes the token → the subscription is gone.
-        await this.verification.expireByToken(userId, purchaseToken, AuditSource.RTDN);
+        await this.verification.expireByToken(purchaseToken, AuditSource.RTDN);
         return;
       }
       if (err instanceof UnknownProductError) {

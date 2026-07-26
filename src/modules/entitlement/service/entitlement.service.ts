@@ -187,6 +187,55 @@ export class EntitlementService {
     incMetric(METRICS.entitlementRevoked, { entitlement, status: toStatus });
   }
 
+  /**
+   * Close the entitlement granted by ONE specific source record (purchase),
+   * identified by (userId, entitlement, source, sourceRef). Unlike
+   * {@link closeWithinTx} — which closes whichever premium row is currently
+   * active — this targets a single link of a subscription chain, so an event for
+   * a superseded/old token can only ever close that token's own entitlement and
+   * never the successor's. No-op if that specific grant is not active.
+   */
+  async closeBySourceWithinTx(
+    db: Db,
+    userId: string,
+    entitlement: EntitlementType,
+    source: EntitlementSource,
+    sourceRef: string,
+    toStatus: typeof EntitlementStatus.EXPIRED | typeof EntitlementStatus.REVOKED,
+    reason: EntitlementChangeReason,
+    relatedPurchaseId?: string | null,
+  ): Promise<void> {
+    const active = await this.repo.findActiveEntitlementBySource(userId, entitlement, source, sourceRef, db);
+    if (!active) return;
+
+    await this.repo.upsertEntitlement(
+      {
+        userId: active.userId,
+        entitlement: active.entitlement,
+        source: active.source,
+        sourceRef: active.sourceRef,
+        status: toStatus,
+        expiresAt: active.expiresAt,
+      },
+      db,
+    );
+
+    await this.repo.createHistory(
+      {
+        userId,
+        entitlement,
+        fromStatus: active.status,
+        toStatus,
+        reason,
+        relatedPurchaseId: relatedPurchaseId ?? null,
+      },
+      db,
+    );
+
+    await this.refreshPremiumCache(userId, db);
+    incMetric(METRICS.entitlementRevoked, { entitlement, status: toStatus });
+  }
+
   // ── Legacy cache bridge ───────────────────────────────────────────────────────
 
   /**

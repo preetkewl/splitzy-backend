@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth, validateRequest } from '../../../middlewares/index.js';
 import type { TokenService } from '../../auth/service/token.service.js';
+import { correlationMiddleware } from '../../entitlement/observability/index.js';
 import type { SubscriptionController } from '../controller/subscription.controller.js';
 import type { RtdnController } from '../rtdn/rtdn.controller.js';
 import { verifyRtdnToken } from '../rtdn/rtdn-auth.middleware.js';
@@ -13,6 +14,10 @@ export function createSubscriptionRouter(deps: {
 }): Router {
   const router = Router();
   const auth = requireAuth(deps.tokens);
+
+  // Establishes the ambient correlation id (from X-Request-Id) for the whole
+  // subscription surface so every downstream billing log carries it.
+  router.use(correlationMiddleware);
 
   router.post(
     '/verify',

@@ -21,6 +21,23 @@ import { REWARD_TYPES } from '../constants.js';
  */
 export type Db = PrismaClient | Prisma.TransactionClient;
 
+/**
+ * Thrown when a write would bind or mutate a purchase token that already belongs
+ * to a DIFFERENT account. A domain-level error (no HTTP coupling) so the service
+ * maps it to a 409; it exists so `upsertVerifiedPurchase` can NEVER silently
+ * re-own another user's purchase, even if a caller forgets the ownership guard.
+ */
+export class PurchaseOwnershipError extends Error {
+  constructor(
+    public readonly purchaseToken: string,
+    public readonly ownerUserId: string,
+    public readonly requesterUserId: string,
+  ) {
+    super('Purchase token is owned by a different account');
+    this.name = 'PurchaseOwnershipError';
+  }
+}
+
 export interface RecordPurchaseInput {
   userId: string;
   purchaseToken: string;
@@ -90,6 +107,33 @@ export class EntitlementRepository {
   }
 
   /**
+   * Serializes all writers for a given purchase token by taking a transaction-
+   * scoped Postgres advisory lock keyed on the token. MUST be called with a
+   * transaction executor as the FIRST statement in the verify transaction: it
+   * makes the "check ownership → upsert → grant" sequence atomic against
+   * concurrent verifies of the SAME token, including brand-new tokens that have
+   * no row yet to `SELECT ... FOR UPDATE`. The lock releases automatically when
+   * the transaction commits or rolls back. Mirrors the advisory-lock convention
+   * already used by the reward / limit-evaluation services.
+   */
+  async acquireTokenLock(purchaseToken: string, db: Db = this.prisma): Promise<void> {
+    await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${purchaseToken}))`;
+  }
+
+  /**
+   * Row-locks the existing purchase for a token (`SELECT ... FOR UPDATE`) and
+   * returns its owner, or null when no row exists yet. Used inside the verify
+   * transaction (after {@link acquireTokenLock}) so the ownership decision reads
+   * committed, locked state.
+   */
+  async lockPurchaseOwner(purchaseToken: string, db: Db = this.prisma): Promise<{ id: string; userId: string } | null> {
+    const rows = await db.$queryRaw<Array<{ id: string; userId: string }>>`
+      SELECT "id", "userId" FROM "subscription_purchases" WHERE "purchaseToken" = ${purchaseToken} FOR UPDATE
+    `;
+    return rows[0] ?? null;
+  }
+
+  /**
    * Idempotent on `purchaseToken` (its unique constraint). A repeat call for the
    * same token UPDATES the existing row rather than inserting a duplicate — the
    * replay-safe write. Cross-user ownership is enforced one level up, in the
@@ -114,11 +158,18 @@ export class EntitlementRepository {
 
   /**
    * Idempotent on `purchaseToken`: persist the Google-verified state. On a
-   * repeat verify this UPDATES the existing row in place (no duplicate). The
-   * unique constraint on purchaseToken still guards a concurrent race; the
-   * cross-user ownership check is enforced in the service before this runs.
+   * repeat verify by the SAME owner this UPDATES the existing row in place (no
+   * duplicate).
+   *
+   * OWNERSHIP-SAFE: it can NEVER re-bind or update a token owned by another
+   * account. Implemented as find→guard→update/create (not a blind `upsert`,
+   * whose UPDATE branch omits userId and would therefore silently mutate another
+   * user's row): if the existing row belongs to a different user it throws
+   * {@link PurchaseOwnershipError}. This is the last line of defence behind the
+   * service's advisory lock + ownership check; the `purchaseToken` unique
+   * constraint remains the final backstop for a truly concurrent insert.
    */
-  upsertVerifiedPurchase(input: VerifiedPurchaseInput, db: Db = this.prisma): Promise<SubscriptionPurchase> {
+  async upsertVerifiedPurchase(input: VerifiedPurchaseInput, db: Db = this.prisma): Promise<SubscriptionPurchase> {
     const shared = {
       productId: input.productId,
       state: input.state,
@@ -130,10 +181,22 @@ export class EntitlementRepository {
       linkedPurchaseToken: input.linkedPurchaseToken,
       latestGoogleState: input.latestGoogleState,
     };
-    return db.subscriptionPurchase.upsert({
+
+    const existing = await db.subscriptionPurchase.findUnique({
       where: { purchaseToken: input.purchaseToken },
-      create: { userId: input.userId, purchaseToken: input.purchaseToken, ...shared },
-      update: shared,
+      select: { id: true, userId: true },
+    });
+
+    if (existing) {
+      if (existing.userId !== input.userId) {
+        throw new PurchaseOwnershipError(input.purchaseToken, existing.userId, input.userId);
+      }
+      // Update by id and never touch userId — ownership is immutable here.
+      return db.subscriptionPurchase.update({ where: { id: existing.id }, data: shared });
+    }
+
+    return db.subscriptionPurchase.create({
+      data: { userId: input.userId, purchaseToken: input.purchaseToken, ...shared },
     });
   }
 
@@ -214,6 +277,26 @@ export class EntitlementRepository {
         OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
       },
       orderBy: [{ expiresAt: 'desc' }],
+    });
+  }
+
+  /**
+   * The ACTIVE entitlement granted by a SPECIFIC source record (a given
+   * purchase). Unlike {@link findActiveEntitlement}, this targets one link of a
+   * subscription chain by its `sourceRef` — so closing a superseded/expired
+   * predecessor can never touch the successor's entitlement, and vice-versa.
+   * Status filter is ACTIVE only (no expiry filter: an event may legitimately
+   * close an already-past-expiry-but-still-ACTIVE row, e.g. within grace).
+   */
+  findActiveEntitlementBySource(
+    userId: string,
+    entitlement: EntitlementType,
+    source: EntitlementSource,
+    sourceRef: string,
+    db: Db = this.prisma,
+  ): Promise<UserEntitlement | null> {
+    return db.userEntitlement.findFirst({
+      where: { userId, entitlement, source, sourceRef, status: EntitlementStatus.ACTIVE },
     });
   }
 

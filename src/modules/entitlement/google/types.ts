@@ -46,3 +46,21 @@ export class UnknownProductError extends Error {
     this.name = 'UnknownProductError';
   }
 }
+
+/**
+ * A purchase token cannot be attributed to any user: it is unknown AND either
+ * carries no `linkedPurchaseToken` or the linked predecessor is not on record.
+ * Raised when there is no asserted (client) identity to fall back on — i.e. from
+ * an RTDN for a brand-new token in a chain we have never seen. The caller treats
+ * it as terminal-but-harmless (records "unknown_purchase"); a later client
+ * verify or the reconciliation sweep re-derives truth.
+ */
+export class UnattributableTokenError extends Error {
+  constructor(
+    public readonly purchaseToken: string,
+    public readonly linkedPurchaseToken: string | null,
+  ) {
+    super('Purchase token cannot be attributed to a user (unknown token, no known linked predecessor)');
+    this.name = 'UnattributableTokenError';
+  }
+}

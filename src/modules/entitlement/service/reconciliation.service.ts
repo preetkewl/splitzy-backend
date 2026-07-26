@@ -5,6 +5,14 @@ import { emitAlert, emitMetric } from '../../../utils/metrics.js';
 import { AuditEventType, AuditSource } from '../constants.js';
 import type { GooglePlayClient } from '../google/google-play-client.js';
 import { GooglePlayConfigError, InvalidPurchaseTokenError, UnknownProductError } from '../google/types.js';
+import {
+  ERROR_CLASS,
+  newCorrelationId,
+  runWithCorrelation,
+  subLog,
+  subMetric,
+  SUB_EVENT,
+} from '../observability/index.js';
 import type { EntitlementRepository } from '../repository/entitlement.repository.js';
 import type { VerificationService } from './verification.service.js';
 
@@ -62,22 +70,38 @@ export class ReconciliationService {
       return { scanned: 0, reconciled: 0, expired: 0, failed: 0, durationMs: 0 };
     }
 
+    const sweepCorrelationId = newCorrelationId('sweep');
     const startedAt = Date.now();
     const batch = await fetchBatch();
     const summary: SweepSummary = { scanned: batch.length, reconciled: 0, expired: 0, failed: 0, durationMs: 0 };
+    subLog('info', SUB_EVENT.RECONCILE_STARTED, {
+      source: 'system',
+      outcome: 'started',
+      extra: { sweep: name, scanned: batch.length, correlationId: sweepCorrelationId },
+    });
 
     for (const purchase of batch) {
+      // Correlate every log for this purchase's reconcile under one id, and join
+      // it to the purchase's lifetime via the token hash.
       try {
-        await this.verification.reconcileFromGoogle(purchase.userId, purchase.purchaseToken, {
-          auditSource: AuditSource.SYSTEM,
-          successEvent: AuditEventType.PURCHASE_UPDATED,
-        });
+        await runWithCorrelation(newCorrelationId('sweep-item'), () =>
+          this.verification.reconcileFromGoogle(purchase.userId, purchase.purchaseToken, {
+            auditSource: AuditSource.SYSTEM,
+            successEvent: AuditEventType.PURCHASE_UPDATED,
+          }),
+        );
         summary.reconciled += 1;
       } catch (err) {
         if (err instanceof InvalidPurchaseTokenError) {
           // Google dropped the token → the subscription ended. Expire locally.
-          await this.verification.expireByToken(purchase.userId, purchase.purchaseToken, AuditSource.SYSTEM);
+          await this.verification.expireByToken(purchase.purchaseToken, AuditSource.SYSTEM);
           summary.expired += 1;
+          subLog('info', SUB_EVENT.ENTITLEMENT_EXPIRED, {
+            userId: purchase.userId,
+            purchaseToken: purchase.purchaseToken,
+            source: 'system',
+            outcome: 'expired',
+          });
           continue;
         }
         if (err instanceof GooglePlayConfigError) {
@@ -91,6 +115,14 @@ export class ReconciliationService {
           continue;
         }
         logger.error({ err, purchaseId: purchase.id, sweep: name }, 'sweep item failed');
+        subLog('error', SUB_EVENT.RECONCILE_ITEM_FAILED, {
+          userId: purchase.userId,
+          purchaseToken: purchase.purchaseToken,
+          source: 'system',
+          errorClass: ERROR_CLASS.UNEXPECTED,
+          outcome: 'failed',
+          extra: { sweep: name },
+        });
         summary.failed += 1;
       }
     }
@@ -102,11 +134,17 @@ export class ReconciliationService {
     emitMetric(METRICS.reconcileReconciled, summary.reconciled, { sweep: name });
     emitMetric(METRICS.reconcileExpired, summary.expired, { sweep: name });
     emitMetric(METRICS.reconcileFailed, summary.failed, { sweep: name });
+    subMetric(METRICS.expiredSubscriptions, summary.expired, { sweep: name });
+    // The acknowledgement sweep's re-processed items ARE the ack retries.
+    if (name === 'acknowledgement') {
+      subMetric(METRICS.ackRetryCount, summary.reconciled, { sweep: name });
+    }
 
     // Authoritative ack-backlog gauge AFTER the sweep (what's still at refund
     // risk). Alert if anything remains unacknowledged.
     const ackBacklog = await this.repo.countUnacknowledged();
     emitMetric(METRICS.ackBacklog, ackBacklog, { sweep: name });
+    subMetric(METRICS.retryQueueDepth, ackBacklog, { sweep: name });
     if (ackBacklog >= ALERT_THRESHOLDS.ackBacklog) {
       emitAlert('ack_backlog_nonzero', 'critical', { backlog: ackBacklog, sweep: name });
     }
@@ -114,6 +152,12 @@ export class ReconciliationService {
       emitAlert('sweep_item_failures', 'warning', { failed: summary.failed, sweep: name });
     }
 
+    subLog('info', SUB_EVENT.RECONCILE_COMPLETED, {
+      source: 'system',
+      latencyMs: summary.durationMs,
+      outcome: 'completed',
+      extra: { sweep: name, ackBacklog, ...summary, correlationId: sweepCorrelationId },
+    });
     logger.info({ sweep: name, limit, ackBacklog, ...summary }, 'sweep complete');
     return summary;
   }

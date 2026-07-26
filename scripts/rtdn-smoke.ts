@@ -25,7 +25,7 @@ import { EntitlementStatus, SETTLIO_PREMIUM_MONTHLY, SubscriptionState } from '.
 import type { GooglePlayClient } from '../src/modules/entitlement/google/google-play-client.js';
 import { SUB_NOTIFICATION } from '../src/modules/entitlement/google/rtdn-types.js';
 import { InvalidPurchaseTokenError, type NormalizedSubscription } from '../src/modules/entitlement/google/types.js';
-import type { EntitlementRepository } from '../src/modules/entitlement/repository/entitlement.repository.js';
+import { type EntitlementRepository, PurchaseOwnershipError } from '../src/modules/entitlement/repository/entitlement.repository.js';
 import { EntitlementService } from '../src/modules/entitlement/service/entitlement.service.js';
 import { ReconciliationService } from '../src/modules/entitlement/service/reconciliation.service.js';
 import { RtdnService } from '../src/modules/entitlement/service/rtdn.service.js';
@@ -57,11 +57,20 @@ class FakeRepo {
   async findPurchaseByToken(token: string) {
     return this.purchases.get(token) ?? null;
   }
-  async upsertVerifiedPurchase(input: Record<string, unknown> & { purchaseToken: string }) {
+  async acquireTokenLock(_token: string) {}
+  async lockPurchaseOwner(token: string) {
+    const row = this.purchases.get(token);
+    return row ? { id: row.id, userId: row.userId } : null;
+  }
+  async upsertVerifiedPurchase(input: Record<string, unknown> & { purchaseToken: string; userId: string }) {
     const existing = this.purchases.get(input.purchaseToken);
+    if (existing && existing.userId !== input.userId) {
+      throw new PurchaseOwnershipError(input.purchaseToken, existing.userId, input.userId);
+    }
     const row = {
       ...(existing ?? { id: randomUUID(), createdAt: new Date() }),
       ...input,
+      userId: existing ? existing.userId : input.userId,
       updatedAt: new Date(),
     } as unknown as SubscriptionPurchase;
     this.purchases.set(input.purchaseToken, row);
@@ -111,6 +120,18 @@ class FakeRepo {
           e.entitlement === entitlement &&
           e.status === EntitlementStatus.ACTIVE &&
           (e.expiresAt === null || e.expiresAt > now),
+      ) ?? null
+    );
+  }
+  async findActiveEntitlementBySource(userId: string, entitlement: string, source: string, sourceRef: string) {
+    return (
+      this.entitlements.find(
+        (e) =>
+          e.userId === userId &&
+          e.entitlement === entitlement &&
+          e.source === source &&
+          e.sourceRef === sourceRef &&
+          e.status === EntitlementStatus.ACTIVE,
       ) ?? null
     );
   }

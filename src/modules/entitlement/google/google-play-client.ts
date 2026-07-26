@@ -1,7 +1,9 @@
 import { type androidpublisher_v3, google } from 'googleapis';
+import { METRICS } from '../../../constants/metrics.js';
 import { env } from '../../../config/env.js';
 import { logger } from '../../../utils/logger.js';
 import { SubscriptionState } from '../constants.js';
+import { elapsedMs, startTimer, subLog, subMetric, SUB_EVENT } from '../observability/index.js';
 import { GooglePlayConfigError, InvalidPurchaseTokenError, type NormalizedSubscription } from './types.js';
 
 /**
@@ -95,11 +97,13 @@ export class AndroidPublisherGooglePlayClient implements GooglePlayClient {
 
   async getSubscription(purchaseToken: string): Promise<NormalizedSubscription> {
     const client = this.requireClient();
+    const started = startTimer();
     try {
       const res = await client.purchases.subscriptionsv2.get({
         packageName: this.packageName,
         token: purchaseToken,
       });
+      this.recordApi('get', 'ok', started, purchaseToken, undefined);
       return this.normalize(res.data);
     } catch (err) {
       const status = httpStatusOf(err);
@@ -107,19 +111,47 @@ export class AndroidPublisherGooglePlayClient implements GooglePlayClient {
       // (the caller maps to a 4xx and grants nothing). 401/403/5xx are config /
       // transient failures and must propagate as unexpected errors.
       if (status === 400 || status === 404 || status === 410) {
+        this.recordApi('get', 'invalid_token', started, purchaseToken, status);
         throw new InvalidPurchaseTokenError();
       }
+      this.recordApi('get', 'error', started, purchaseToken, status);
       throw err;
     }
   }
 
   async acknowledgeSubscription(productId: string, purchaseToken: string): Promise<void> {
     const client = this.requireClient();
-    await client.purchases.subscriptions.acknowledge({
-      packageName: this.packageName,
-      subscriptionId: productId,
-      token: purchaseToken,
-      requestBody: {},
+    const started = startTimer();
+    try {
+      await client.purchases.subscriptions.acknowledge({
+        packageName: this.packageName,
+        subscriptionId: productId,
+        token: purchaseToken,
+        requestBody: {},
+      });
+      this.recordApi('acknowledge', 'ok', started, purchaseToken, undefined);
+    } catch (err) {
+      this.recordApi('acknowledge', 'error', started, purchaseToken, httpStatusOf(err));
+      throw err;
+    }
+  }
+
+  /** Records Google Developer API latency + outcome. Observability only. */
+  private recordApi(
+    op: 'get' | 'acknowledge',
+    outcome: string,
+    started: bigint,
+    purchaseToken: string,
+    status: number | undefined,
+  ): void {
+    const latencyMs = elapsedMs(started);
+    subMetric(METRICS.googleApiLatencyMs, latencyMs, { op, outcome });
+    subMetric(METRICS.googleApiCall, 1, { op, outcome });
+    subLog(outcome === 'error' ? 'warn' : 'info', SUB_EVENT.GOOGLE_API_CALL, {
+      purchaseToken,
+      outcome,
+      latencyMs,
+      extra: { op, ...(status !== undefined ? { httpStatus: status } : {}) },
     });
   }
 

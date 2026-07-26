@@ -42,7 +42,7 @@ async function main(): Promise<void> {
   const fakeService = {
     verify(userId: string, purchaseToken: string): Promise<VerificationResult> {
       captured.push({ userId, purchaseToken });
-      return Promise.resolve({ isPremium: true, productId: 'settlio_premium_monthly', expiresAt: null });
+      return Promise.resolve({ isPremium: true, productId: 'settlio_premium_monthly', expiresAt: null, acknowledged: true });
     },
   } as unknown as SubscriptionService;
 

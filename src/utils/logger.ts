@@ -26,12 +26,22 @@ const baseOptions: LoggerOptions = {
       '*.challengeToken',
       '*.otp',
       '*.devOtp',
+      // Google Play billing secrets — always hash for logs (see observability/
+      // redaction.ts: purchaseTokenHash / orderIdHash). These paths are
+      // defense-in-depth so a raw token/orderId can never leak if logged directly.
+      '*.purchaseToken',
+      '*.linkedPurchaseToken',
+      '*.orderId',
+      '*.latestGoogleState',
       // Two-deep variants for objects like { auth: { ... } }
       '*.*.password',
       '*.*.token',
       '*.*.refreshToken',
       '*.*.accessToken',
       '*.*.otp',
+      '*.*.purchaseToken',
+      '*.*.linkedPurchaseToken',
+      '*.*.orderId',
     ],
     censor: '[REDACTED]',
     remove: false,
