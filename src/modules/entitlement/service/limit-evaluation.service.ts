@@ -11,9 +11,9 @@ export interface GroupLimitDecision {
   premium: boolean;
   /** Current active (non-deleted) owned-group count. */
   usage: number;
-  /** Effective ceiling (free: 2 + reward slots; premium: 10). */
+  /** Effective ceiling (free: 3; premium: 10). */
   limit: number;
-  /** Free tier only: can the user unlock one more slot via a rewarded ad? */
+  /** Always false — the rewarded-ad unlock has been removed. Kept for the DTO contract. */
   rewardAvailable: boolean;
 }
 
@@ -24,8 +24,8 @@ export type CountActiveGroups = () => Promise<number>;
  * Authoritative quota evaluation + enforcement. Domain-agnostic: the active
  * count is provided by the caller (the trip module), so this service never
  * reaches into the trip schema. The effective ceiling comes from
- * {@link RewardService.getGroupAllowance} (free = 2 + earned reward slots,
- * capped at 3; premium = hard cap of 10), keeping allowance math in one place.
+ * {@link RewardService.getGroupAllowance} (free = 3; premium = hard cap of 10),
+ * keeping allowance math in one place.
  */
 export class LimitEvaluationService {
   constructor(private readonly reward: RewardService) {}
@@ -55,12 +55,22 @@ export class LimitEvaluationService {
    * The same lock key serializes reward grants, so a slot can't be earned and
    * spent in two racing transactions.
    */
-  async enforceGroupCreation(db: Db, userId: string, countActive: CountActiveGroups): Promise<void> {
+  async enforceGroupCreation(
+    db: Db,
+    userId: string,
+    countActive: CountActiveGroups,
+  ): Promise<void> {
     await this.lockUser(db, userId);
     const decision = await this.evaluateGroupCreation(userId, countActive, db);
     if (!decision.allowed) {
       logger.warn(
-        { userId, quota: QUOTA_KEYS.ACTIVE_GROUPS, usage: decision.usage, limit: decision.limit, premium: decision.premium },
+        {
+          userId,
+          quota: QUOTA_KEYS.ACTIVE_GROUPS,
+          usage: decision.usage,
+          limit: decision.limit,
+          premium: decision.premium,
+        },
         'group creation blocked by group limit',
       );
       throw decision.premium ? premiumGroupLimitError(decision) : freeGroupLimitError(decision);
@@ -75,9 +85,7 @@ export class LimitEvaluationService {
 }
 
 export function freeGroupLimitError(decision: GroupLimitDecision): ApiError {
-  const message = decision.rewardAvailable
-    ? `Free plan is limited to ${String(decision.limit)} active groups. Watch a short ad to unlock one more, or upgrade to Premium.`
-    : `Free plan is limited to ${String(decision.limit)} active groups. Upgrade to Premium for more.`;
+  const message = `Free plan is limited to ${String(decision.limit)} active groups. Delete or archive a group to make room, or upgrade to Premium for more.`;
   return new ApiError(HTTP.FORBIDDEN, ERROR_CODES.FREE_GROUP_LIMIT_REACHED, message, {
     meta: {
       usage: decision.usage,
@@ -93,12 +101,19 @@ export function premiumGroupLimitError(decision: GroupLimitDecision): ApiError {
     HTTP.FORBIDDEN,
     ERROR_CODES.PREMIUM_GROUP_LIMIT_REACHED,
     `Premium is limited to ${String(decision.limit)} active groups.`,
-    { meta: { usage: decision.usage, limit: decision.limit, premium: true, rewardAvailable: false } },
+    {
+      meta: { usage: decision.usage, limit: decision.limit, premium: true, rewardAvailable: false },
+    },
   );
 }
 
 export function premiumRequiredError(): ApiError {
-  return new ApiError(HTTP.FORBIDDEN, ERROR_CODES.PREMIUM_REQUIRED, 'This feature requires Settlio Premium.', {
-    meta: { premium: false },
-  });
+  return new ApiError(
+    HTTP.FORBIDDEN,
+    ERROR_CODES.PREMIUM_REQUIRED,
+    'This feature requires Settlio Premium.',
+    {
+      meta: { premium: false },
+    },
+  );
 }

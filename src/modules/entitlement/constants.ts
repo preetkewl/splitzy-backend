@@ -83,22 +83,21 @@ export const REWARD_TYPES = {
 export type RewardType = (typeof REWARD_TYPES)[keyof typeof REWARD_TYPES];
 
 /**
- * Free users may OWN this many active (non-deleted) groups/trips before any
- * reward unlock. Expense logging is deliberately NOT limited — it is the core
- * retention loop.
- *
- * The effective free limit is FREE_ACTIVE_GROUP_LIMIT + the user's earned
- * reward slots (capped at MAX_FREE_REWARD_GROUP_SLOTS), so a free user can reach
- * 3 active groups after watching one rewarded ad.
+ * Free users may OWN this many active (non-deleted) groups/trips. Once reached,
+ * the only paths forward are deleting/archiving an existing group or upgrading
+ * to Premium — there is no ad-unlock path. Expense logging is deliberately NOT
+ * limited — it is the core retention loop.
  */
-export const FREE_ACTIVE_GROUP_LIMIT = 2;
+export const FREE_ACTIVE_GROUP_LIMIT = 3;
 
 /**
- * How many extra group slots a free user can earn from rewarded ads. One ad →
- * one permanent slot → effective free cap of 3. Raising this lets a free user
- * stack more ad-unlocked slots without any other code change.
+ * Extra group slots a free user can earn from rewarded ads. Set to 0: the
+ * rewarded-ad unlock has been removed in favour of a straightforward
+ * "delete a group or upgrade" model, so no bonus slots are ever granted and
+ * `rewardAvailable` is always false. The reward endpoint/service remain as a
+ * neutralized no-op for backwards compatibility with older clients.
  */
-export const MAX_FREE_REWARD_GROUP_SLOTS = 1;
+export const MAX_FREE_REWARD_GROUP_SLOTS = 0;
 
 /**
  * Premium users are capped at this many active (non-deleted) owned groups.

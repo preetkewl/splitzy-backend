@@ -13,8 +13,8 @@
  *   6. refunds/revocations remove premium (entitlement gone → limit applies)
  *   7. stale frontend premium cannot bypass (guard reads entitlements, not isPremium)
  *   8. premium middleware resolves / blocks correctly
- *   9. one rewarded ad unlocks a permanent 3rd slot (free limit 2 → 3)
- *  10. reward grant is idempotent + capped (2nd grant is a no-op)
+ *   9. rewarded-ad unlock is neutralized (rewardAvailable always false; grant is a no-op)
+ *  10. reward grant stays a no-op on replay (MAX_FREE_REWARD_GROUP_SLOTS = 0)
  *
  * Run: npm run smoke:enforcement
  */
@@ -117,11 +117,11 @@ async function main(): Promise<void> {
         e.statusCode === 403 &&
         e.code === 'FREE_GROUP_LIMIT_REACHED' &&
         (e.details?.meta as { usage: number; rewardAvailable: boolean }).usage === FREE_ACTIVE_GROUP_LIMIT &&
-        (e.details?.meta as { rewardAvailable: boolean }).rewardAvailable === true,
-      'free user at limit must be blocked with structured error offering the ad reward',
+        (e.details?.meta as { rewardAvailable: boolean }).rewardAvailable === false,
+      'free user at limit must be blocked with a structured error and no ad reward',
     );
     assert.equal(tx.state.lockCalls, 1, 'advisory lock acquired before evaluation (race guard)');
-    console.log(`✓ free user blocked at ${String(FREE_ACTIVE_GROUP_LIMIT)} active groups (structured 403, rewardAvailable, lock taken)`);
+    console.log(`✓ free user blocked at ${String(FREE_ACTIVE_GROUP_LIMIT)} active groups (structured 403, no reward, lock taken)`);
   }
 
   // 1b. Free user under the limit is allowed.
@@ -206,49 +206,43 @@ async function main(): Promise<void> {
     console.log('✓ premium middleware resolves and blocks correctly');
   }
 
-  // 9. One rewarded ad unlocks a permanent 3rd slot (free limit 2 → 3).
+  // 9. Rewarded-ad unlock is neutralized: no reward is ever offered, and a grant
+  //    call (from an older client hitting the endpoint) does not raise the limit.
   {
     const adUser = randomUUID();
     const before = await reward.getGroupAllowance(adUser);
-    assert.equal(before.limit, FREE_ACTIVE_GROUP_LIMIT, 'free user starts at base limit');
-    assert.equal(before.rewardAvailable, true, 'reward available before any ad watched');
+    assert.equal(before.limit, FREE_ACTIVE_GROUP_LIMIT, 'free user is at the flat base limit');
+    assert.equal(before.rewardAvailable, false, 'reward is never available (ad path removed)');
 
     const granted = await reward.grantExtraGroupSlot(adUser, { source: 'smoke' });
-    assert.equal(granted.groupLimit, FREE_ACTIVE_GROUP_LIMIT + 1, 'one ad raises the limit by one');
+    assert.equal(granted.groupLimit, FREE_ACTIVE_GROUP_LIMIT, 'grant is a no-op — limit unchanged');
+    assert.equal(granted.bonusSlots, 0, 'no bonus slots are ever granted');
 
-    // With 2 active groups (was the cap), the 3rd is now allowed.
+    // At the flat limit the free user is blocked, still with no reward.
     const owned: FakeTrip[] = Array.from({ length: FREE_ACTIVE_GROUP_LIMIT }, () => ({
       createdById: adUser,
       deletedAt: null,
     }));
     const tx = makeTx(owned);
-    await limits.enforceGroupCreation(tx as never, adUser, countActive(tx, adUser));
-
-    // A 4th (3 active) is still blocked, and the reward is no longer available.
-    const owned3: FakeTrip[] = Array.from({ length: FREE_ACTIVE_GROUP_LIMIT + 1 }, () => ({
-      createdById: adUser,
-      deletedAt: null,
-    }));
-    const tx3 = makeTx(owned3);
     await assert.rejects(
-      () => limits.enforceGroupCreation(tx3 as never, adUser, countActive(tx3, adUser)),
+      () => limits.enforceGroupCreation(tx as never, adUser, countActive(tx, adUser)),
       (e: unknown) =>
         e instanceof ApiError &&
         e.code === 'FREE_GROUP_LIMIT_REACHED' &&
         (e.details?.meta as { rewardAvailable: boolean }).rewardAvailable === false,
-      'after the single reward, the free user is blocked with no further reward',
+      'free user blocked at the flat limit with no reward path',
     );
-    console.log('✓ one rewarded ad unlocks a permanent 3rd group slot');
+    console.log('✓ rewarded-ad unlock is neutralized (no reward offered, grant is a no-op)');
   }
 
-  // 10. Reward grant is idempotent + capped at MAX_FREE_REWARD_GROUP_SLOTS.
+  // 10. Reward grant stays a no-op on replay (MAX_FREE_REWARD_GROUP_SLOTS = 0).
   {
     const adUser = randomUUID();
     const first = await reward.grantExtraGroupSlot(adUser);
     const second = await reward.grantExtraGroupSlot(adUser); // replay / double-tap
-    assert.equal(first.bonusSlots, MAX_FREE_REWARD_GROUP_SLOTS, 'first grant reaches the cap');
-    assert.equal(second.bonusSlots, MAX_FREE_REWARD_GROUP_SLOTS, 'second grant is a no-op (capped)');
-    console.log('✓ reward grant is idempotent and capped');
+    assert.equal(first.bonusSlots, MAX_FREE_REWARD_GROUP_SLOTS, 'first grant grants nothing (cap 0)');
+    assert.equal(second.bonusSlots, MAX_FREE_REWARD_GROUP_SLOTS, 'second grant is also a no-op');
+    console.log('✓ reward grant stays a no-op (cap is 0)');
   }
 
   console.log('\nAll entitlement enforcement checks passed ✅');
